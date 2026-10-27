@@ -72,7 +72,7 @@ case "$*" in
     [[ "${BOOTSTRAP_KUBECTL_MODE:-success}" != fail-settings-configmap ]] || exit 1
     printf 'apiVersion: v1\nkind: ConfigMap\n'
     ;;
-  *' apply -f '*)
+  *'apply -f '*)
     [[ "${BOOTSTRAP_KUBECTL_MODE:-success}" != fail-apply ]] || exit 1
     if [[ "${BOOTSTRAP_KUBECTL_MODE:-success}" == fail-job-apply && "$*" == *'/bootstrap/job.yaml'* ]]; then
       exit 1
