@@ -139,6 +139,25 @@ run_guard() {
   PLAN_JSON_FILE="$1" bash "$guard" "$1"
 }
 
+if bash "$guard" > "$tmp_dir/no-arguments.out" 2>&1; then
+  printf 'FAIL: guard accepted a call without a plan path\n' >&2
+  exit 1
+fi
+grep -Fq 'FAIL: usage: plan-guard.sh' "$tmp_dir/no-arguments.out" || { printf 'FAIL: guard usage error was not reported\n' >&2; exit 1; }
+
+if run_guard "$tmp_dir/missing.json" > "$tmp_dir/unreadable.out" 2>&1; then
+  printf 'FAIL: guard accepted a missing plan file\n' >&2
+  exit 1
+fi
+grep -Fq 'FAIL: plan JSON is not readable' "$tmp_dir/unreadable.out" || { printf 'FAIL: guard unreadable-file error was not reported\n' >&2; exit 1; }
+
+printf '{\n' > "$tmp_dir/invalid.json"
+if run_guard "$tmp_dir/invalid.json" > "$tmp_dir/invalid.out" 2>&1; then
+  printf 'FAIL: guard accepted invalid JSON\n' >&2
+  exit 1
+fi
+grep -Fq 'FAIL: plan JSON is invalid' "$tmp_dir/invalid.out" || { printf 'FAIL: guard invalid-JSON error was not reported\n' >&2; exit 1; }
+
 expect_rejected() {
   local name="$1"
   local filter="$2"

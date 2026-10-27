@@ -71,6 +71,19 @@ grep -Fq 'module.instance.aws_db_instance.this' "$tmp_dir/summary.txt" || fail '
 if grep -Fq 'CANARY_SECRET_VALUE' "$tmp_dir/summary.txt"; then
   fail 'plan summary leaked an output value'
 fi
+if bash "$repo_root/scripts/plan-summary.sh" > "$tmp_dir/summary-no-arguments.out" 2>&1; then
+  fail 'plan summary accepted a call without a plan path'
+fi
+grep -Fq 'FAIL: usage: plan-summary.sh' "$tmp_dir/summary-no-arguments.out" || fail 'plan summary usage error was not reported'
+if bash "$repo_root/scripts/plan-summary.sh" "$tmp_dir/missing-plan.json" > "$tmp_dir/summary-unreadable.out" 2>&1; then
+  fail 'plan summary accepted a missing plan file'
+fi
+grep -Fq 'FAIL: plan JSON is not readable' "$tmp_dir/summary-unreadable.out" || fail 'plan summary unreadable-file error was not reported'
+printf '{"format_version":"1.2","resource_changes":{}}\n' > "$tmp_dir/invalid-plan-shape.json"
+if bash "$repo_root/scripts/plan-summary.sh" "$tmp_dir/invalid-plan-shape.json" > "$tmp_dir/summary-invalid.out" 2>&1; then
+  fail 'plan summary accepted an invalid plan shape'
+fi
+grep -Fq 'FAIL: plan JSON has an invalid shape' "$tmp_dir/summary-invalid.out" || fail 'plan summary invalid-shape error was not reported'
 
 mkdir -p "$tmp_dir/bin"
 cat > "$tmp_dir/bin/aws" <<'SH'
@@ -117,6 +130,10 @@ record_critical_branch smoke_full_runtime_job_preflight
 
 bash "$repo_root/scripts/orphans.sh" --help > "$tmp_dir/orphans-help.out"
 grep -Fq "orphans.sh" "$tmp_dir/orphans-help.out" || fail "orphan check help omitted usage"
+if bash "$repo_root/scripts/orphans.sh" > "$tmp_dir/orphans-no-arguments.out" 2>&1; then
+  fail 'orphan scan accepted a call without a manifest path'
+fi
+grep -Fq 'usage: orphans.sh' "$tmp_dir/orphans-no-arguments.out" || fail 'orphan scan usage error was not reported'
 
 [[ -e "$ORCHESTRATION_TEST_AWS_CALLED" ]] || fail "bootstrap preflight did not reach the fake AWS CLI"
 [[ ! -e "$ORCHESTRATION_TEST_KUBECTL_CALLED" ]] || fail "failed AWS preflight reached kubectl"
