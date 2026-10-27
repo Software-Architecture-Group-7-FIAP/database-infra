@@ -124,7 +124,7 @@ jobs:
   sql:
     name: PostgreSQL permission integration
     if: github.event_name != 'schedule'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     services:
       postgres:
         image: postgres:16-alpine

@@ -25,6 +25,7 @@ grep -Fq 'services:' "$workflows/ci.yml" || fail 'SQL CI must use an ephemeral P
 grep -Fq 'postgres:16-alpine' "$workflows/ci.yml" || fail 'SQL CI must pin PostgreSQL 16 Alpine'
 grep -Fq 'terraform test (root SSM sensitivity regression)' "$workflows/ci.yml" || fail 'CI must run the root provider-sensitivity regression'
 grep -Fq 'kcov v42' "$workflows/ci.yml" || fail 'CI must pin the shell coverage tool release'
+grep -Fq 'runs-on: ubuntu-22.04' "$workflows/ci.yml" || fail 'kcov v42 must run on its compatible Ubuntu 22.04 userspace'
 grep -Fq 'tests/shell-coverage.sh' "$workflows/ci.yml" || fail 'CI must enforce measured shell coverage'
 if rg -n 'skip-check|skip_check' "$repo_root/.checkov.yaml"; then
   fail 'unverified global Checkov suppressions are prohibited'
