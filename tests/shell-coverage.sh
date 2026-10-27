@@ -47,7 +47,12 @@ coverage_json="$(find "$merged_output" -type f -name coverage.json -print -quit)
 coverage_percent="$("$jq_bin" -er '.percent_covered' "$coverage_json")" || fail 'kcov coverage.json has no percent_covered metric'
 [[ "$coverage_percent" =~ ^[0-9]+([.][0-9]+)?$ ]] || fail 'kcov reported an invalid coverage percentage'
 awk -v percentage="$coverage_percent" 'BEGIN { exit !(percentage >= 80) }' \
-  || fail "executable shell line coverage ${coverage_percent}% is below the required 80%"
+  || {
+    printf 'Per-file shell coverage:\n' >&2
+    "$jq_bin" -r '.files[] | "\(.percent_covered)%\t\(.covered_lines)/\(.total_lines)\t\(.file)"' \
+      "$coverage_json" >&2
+    fail "executable shell line coverage ${coverage_percent}% is below the required 80%"
+  }
 
 critical_branches=(
   plan_guard_replacement_unknown_and_redaction
