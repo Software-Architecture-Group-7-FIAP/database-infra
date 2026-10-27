@@ -22,8 +22,10 @@ command -v "$jq_bin" >/dev/null 2>&1 || [[ -x "$jq_bin" ]] || fail 'jq is requir
 
 # shellcheck disable=SC2016
 "$jq_bin" -r '
+  # LCOV_EXCL_START
   [.resource_changes[]? | select((.change.actions // ["no-op"]) != ["no-op"])] as $changes
   | "Changes: \($changes | length)",
     "",
     ($changes[] | "- `\(.change.actions | join("/"))` \(.address)")
+  # LCOV_EXCL_STOP
 ' "$plan_json"

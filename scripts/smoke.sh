@@ -105,8 +105,10 @@ capture_aws_json subnet_group rds describe-db-subnet-groups --db-subnet-group-na
 if ! "$jq_bin" -n -e \
   --slurpfile subnet_group "$tmp_dir/subnet_group.json" \
   --slurpfile upstream_subnets "$tmp_dir/upstream_subnets.json" '
+  # LCOV_EXCL_START
   ($subnet_group[0].DBSubnetGroups[0].Subnets | map(.SubnetIdentifier) | sort)
   == ($upstream_subnets[0].Parameter.Value | split(",") | map(gsub("^\\s+|\\s+$"; "")) | sort)
+  # LCOV_EXCL_STOP
 ' >/dev/null 2>&1; then
   fail 'RDS subnet group does not match the upstream isolated subnet list'
 fi

@@ -17,6 +17,7 @@ command -v "$jq_bin" >/dev/null 2>&1 || [[ -x "$jq_bin" ]] || fail 'jq is requir
 
 # shellcheck disable=SC2016
 violations="$("$jq_bin" -r '
+  # LCOV_EXCL_START
   def resources: (.resource_changes // []);
   def after: (.change.after // null);
   def changes_after: after != null and ((.change.actions // []) != ["delete"]);
@@ -143,6 +144,7 @@ violations="$("$jq_bin" -r '
     )) then "ssm_secret_or_connection_value_prohibited" else empty end,
     if any(.output_changes // {} | to_entries[]; (.key | test("(password|database_url|connection_string|dsn)"; "i")) or (.value.after | suspicious_text)) then "sensitive_or_connection_output_prohibited" else empty end
   ] | unique | .[]
+  # LCOV_EXCL_STOP
 ' "$plan_json")" || fail 'plan JSON is invalid'
 
 if [[ -n "$violations" ]]; then

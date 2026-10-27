@@ -11,6 +11,7 @@ fail() {
 if [[ "${1:-}" == --run-suite ]]; then
   bash "$repo_root/tests/root-contract.sh"
   bash "$repo_root/tests/plan-guard.sh"
+  bash "$repo_root/tests/bootstrap-runtime.sh"
   bash "$repo_root/tests/script-contracts.sh"
   bash "$repo_root/tests/sql-permissions.sh"
   bash "$repo_root/tests/workflow-contract.sh"
