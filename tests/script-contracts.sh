@@ -425,4 +425,37 @@ if grep -Fq 'CANARY_SECRET_VALUE' "$tmp_dir/smoke-ssm-failure.out"; then
   fail 'SSM batch failure leaked a canary value'
 fi
 
+if bash "$repo_root/scripts/smoke.sh" invalid-phase > "$tmp_dir/smoke-invalid-phase.out" 2>&1; then
+  fail 'smoke accepted an unsupported phase'
+else
+  status=$?
+  [[ "$status" -eq 64 ]] || fail "unsupported smoke phase returned $status instead of usage status 64"
+  grep -Fq 'usage: smoke.sh [initial|full]' "$tmp_dir/smoke-invalid-phase.out" || fail 'unsupported smoke phase did not report usage'
+fi
+
+if bash "$repo_root/scripts/smoke.sh" initial extra > "$tmp_dir/smoke-extra-arguments.out" 2>&1; then
+  fail 'smoke accepted more than one phase argument'
+else
+  status=$?
+  [[ "$status" -eq 64 ]] || fail "extra smoke arguments returned $status instead of usage status 64"
+  grep -Fq 'usage: smoke.sh [initial|full]' "$tmp_dir/smoke-extra-arguments.out" || fail 'extra smoke arguments did not report usage'
+fi
+
+if AWS_BIN=missing-smoke-aws bash "$repo_root/scripts/smoke.sh" initial > "$tmp_dir/smoke-missing-aws.out" 2>&1; then
+  fail 'smoke accepted a missing AWS CLI'
+else
+  status=$?
+  [[ "$status" -eq 1 ]] || fail "missing AWS CLI returned $status instead of a closed failure"
+  grep -Fq 'FAIL: aws CLI is required' "$tmp_dir/smoke-missing-aws.out" || fail 'missing AWS CLI did not report a clear preflight error'
+fi
+
+if AWS_BIN="$tmp_dir/bin/smoke-aws" JQ_BIN=missing-smoke-jq \
+  bash "$repo_root/scripts/smoke.sh" initial > "$tmp_dir/smoke-missing-jq.out" 2>&1; then
+  fail 'smoke accepted a missing jq executable'
+else
+  status=$?
+  [[ "$status" -eq 1 ]] || fail "missing jq returned $status instead of a closed failure"
+  grep -Fq 'FAIL: jq is required' "$tmp_dir/smoke-missing-jq.out" || fail 'missing jq did not report a clear preflight error'
+fi
+
 printf 'PASS: summaries redact plan values and unverified secret resolution fails closed before network access\n'
