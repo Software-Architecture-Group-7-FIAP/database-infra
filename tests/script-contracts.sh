@@ -84,6 +84,10 @@ if bash "$repo_root/scripts/plan-summary.sh" "$tmp_dir/invalid-plan-shape.json" 
   fail 'plan summary accepted an invalid plan shape'
 fi
 grep -Fq 'FAIL: plan JSON has an invalid shape' "$tmp_dir/summary-invalid.out" || fail 'plan summary invalid-shape error was not reported'
+if JQ_BIN=missing-jq bash "$repo_root/scripts/plan-summary.sh" "$tmp_dir/plan.json" > "$tmp_dir/summary-missing-jq.out" 2>&1; then
+  fail 'plan summary accepted an unavailable jq executable'
+fi
+grep -Fq 'FAIL: jq is required' "$tmp_dir/summary-missing-jq.out" || fail 'plan summary missing-jq error was not reported'
 
 mkdir -p "$tmp_dir/bin"
 cat > "$tmp_dir/bin/aws" <<'SH'

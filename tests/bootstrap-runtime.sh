@@ -24,9 +24,15 @@ printf '%s\n' "$*" >> "$BOOTSTRAP_AWS_CALLS"
 
 case "$*" in
   'sts get-caller-identity --query Account --output text')
+    if [[ "${BOOTSTRAP_AWS_MODE:-success}" == fail-sts ]]; then
+      exit 1
+    fi
     printf '%s\n' "${BOOTSTRAP_AWS_ACCOUNT:-035611741563}"
     ;;
   '--region us-east-1 ssm get-parameters --names '*)
+    if [[ "${BOOTSTRAP_AWS_MODE:-success}" == fail-ssm ]]; then
+      exit 1
+    fi
     cat "$BOOTSTRAP_SSM_FIXTURE"
     ;;
   'eks update-kubeconfig '*)
@@ -46,10 +52,30 @@ printf '%s\n' "$*" >> "$BOOTSTRAP_KUBECTL_CALLS"
 
 case "$*" in
   *' get job/auto-shop-db-bootstrap -o json')
+    if [[ "${BOOTSTRAP_KUBECTL_MODE:-success}" == fail-job-status ]]; then
+      exit 1
+    fi
     if [[ "${BOOTSTRAP_KUBECTL_MODE:-success}" == failed-job ]]; then
       printf '{"status":{"failed":1}}\n'
     else
       printf '{"status":{"succeeded":1}}\n'
+    fi
+    ;;
+  *' delete job/auto-shop-db-bootstrap '*)
+    [[ "${BOOTSTRAP_KUBECTL_MODE:-success}" != fail-delete ]]
+    ;;
+  *' create configmap auto-shop-db-bootstrap-sql '*)
+    [[ "${BOOTSTRAP_KUBECTL_MODE:-success}" != fail-sql-configmap ]] || exit 1
+    printf 'apiVersion: v1\nkind: ConfigMap\n'
+    ;;
+  *' create configmap auto-shop-db-bootstrap-settings '*)
+    [[ "${BOOTSTRAP_KUBECTL_MODE:-success}" != fail-settings-configmap ]] || exit 1
+    printf 'apiVersion: v1\nkind: ConfigMap\n'
+    ;;
+  *' apply -f '*)
+    [[ "${BOOTSTRAP_KUBECTL_MODE:-success}" != fail-apply ]] || exit 1
+    if [[ "${BOOTSTRAP_KUBECTL_MODE:-success}" == fail-job-apply && "$*" == *'/bootstrap/job.yaml'* ]]; then
+      exit 1
     fi
     ;;
   *' create configmap '*)
@@ -99,11 +125,13 @@ expect_bootstrap_failure() {
   local account="${4:-035611741563}"
   local fail_kubeconfig="${5:-false}"
   local kubectl_mode="${6:-success}"
+  local aws_mode="${7:-success}"
   local output="$tmp_dir/$label.out"
 
   if PATH="$bin_dir:$PATH" \
     BOOTSTRAP_SSM_FIXTURE="$fixture" \
     BOOTSTRAP_AWS_ACCOUNT="$account" \
+    BOOTSTRAP_AWS_MODE="$aws_mode" \
     BOOTSTRAP_AWS_FAIL_KUBECONFIG="$fail_kubeconfig" \
     BOOTSTRAP_KUBECTL_MODE="$kubectl_mode" \
     bash "$repo_root/scripts/bootstrap-db.sh" bootstrap > "$output" 2>&1; then
@@ -156,5 +184,21 @@ expect_bootstrap_failure kubeconfig_failure 'EKS kubeconfig setup failed' \
   "$BOOTSTRAP_SSM_FIXTURE" 035611741563 true
 expect_bootstrap_failure failed_job 'bootstrap Job phase bootstrap failed; private diagnostics were discarded' \
   "$BOOTSTRAP_SSM_FIXTURE" 035611741563 false failed-job
+expect_bootstrap_failure sts_failure 'AWS caller identity preflight failed' \
+  "$BOOTSTRAP_SSM_FIXTURE" 035611741563 false success fail-sts
+expect_bootstrap_failure ssm_failure 'database SSM metadata query failed' \
+  "$BOOTSTRAP_SSM_FIXTURE" 035611741563 false success fail-ssm
+expect_bootstrap_failure stale_delete_failure 'stale bootstrap Kubernetes resources could not be removed' \
+  "$BOOTSTRAP_SSM_FIXTURE" 035611741563 false fail-delete
+expect_bootstrap_failure sql_configmap_failure 'bootstrap source ConfigMap could not be rendered' \
+  "$BOOTSTRAP_SSM_FIXTURE" 035611741563 false fail-sql-configmap
+expect_bootstrap_failure settings_configmap_failure 'bootstrap settings ConfigMap could not be rendered' \
+  "$BOOTSTRAP_SSM_FIXTURE" 035611741563 false fail-settings-configmap
+expect_bootstrap_failure resource_apply_failure 'bootstrap ServiceAccount or ConfigMap could not be applied' \
+  "$BOOTSTRAP_SSM_FIXTURE" 035611741563 false fail-apply
+expect_bootstrap_failure job_apply_failure 'bootstrap Job could not be applied' \
+  "$BOOTSTRAP_SSM_FIXTURE" 035611741563 false fail-job-apply
+expect_bootstrap_failure job_status_failure 'bootstrap Job status could not be read' \
+  "$BOOTSTRAP_SSM_FIXTURE" 035611741563 false fail-job-status
 
 printf 'PASS: bootstrap runtime completed with local AWS and Kubernetes fixtures\n'

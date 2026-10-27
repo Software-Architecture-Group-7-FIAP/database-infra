@@ -158,6 +158,12 @@ if run_guard "$tmp_dir/invalid.json" > "$tmp_dir/invalid.out" 2>&1; then
 fi
 grep -Fq 'FAIL: plan JSON is invalid' "$tmp_dir/invalid.out" || { printf 'FAIL: guard invalid-JSON error was not reported\n' >&2; exit 1; }
 
+if JQ_BIN=missing-jq run_guard "$tmp_dir/valid.json" > "$tmp_dir/missing-jq.out" 2>&1; then
+  printf 'FAIL: guard accepted an unavailable jq executable\n' >&2
+  exit 1
+fi
+grep -Fq 'FAIL: jq is required' "$tmp_dir/missing-jq.out" || { printf 'FAIL: guard missing-jq error was not reported\n' >&2; exit 1; }
+
 expect_rejected() {
   local name="$1"
   local filter="$2"
