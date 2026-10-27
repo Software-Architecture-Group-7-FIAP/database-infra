@@ -31,7 +31,7 @@ coverage_output="$tmp_dir/coverage"
 export SHELL_COVERAGE_BRANCH_REPORT="$branch_report"
 
 if ! "$kcov_bin" --include-path="$repo_root/scripts" "$coverage_output" \
-  bash "$repo_root/tests/shell-coverage.sh" --run-suite > "$tmp_dir/run.log" 2>&1; then
+  "$repo_root/tests/shell-coverage.sh" --run-suite > "$tmp_dir/run.log" 2>&1; then
   cat "$tmp_dir/run.log" >&2
   fail 'shell regression suite failed under kcov'
 fi

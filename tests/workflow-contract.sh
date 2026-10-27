@@ -27,6 +27,7 @@ grep -Fq 'terraform test (root SSM sensitivity regression)' "$workflows/ci.yml" 
 grep -Fq 'kcov v42' "$workflows/ci.yml" || fail 'CI must pin the shell coverage tool release'
 grep -Fq 'runs-on: ubuntu-22.04' "$workflows/ci.yml" || fail 'kcov v42 must run on its compatible Ubuntu 22.04 userspace'
 grep -Fq 'tests/shell-coverage.sh' "$workflows/ci.yml" || fail 'CI must enforce measured shell coverage'
+grep -Fq '"$repo_root/tests/shell-coverage.sh" --run-suite' "$repo_root/tests/shell-coverage.sh" || fail 'kcov must execute the Bash script directly to collect line coverage'
 if rg -n 'skip-check|skip_check' "$repo_root/.checkov.yaml"; then
   fail 'unverified global Checkov suppressions are prohibited'
 fi
