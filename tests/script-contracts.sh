@@ -362,10 +362,11 @@ case "$arguments" in
       exit 255
     fi
     requested_names_json="$(printf '%s\n' "${requested_names[@]}" | jq -Rsc 'split("\n") | map(select(length > 0))')"
-    jq --argjson requested "$requested_names_json" '
+    jq --argjson requested "$requested_names_json" --arg failure "${SMOKE_TEST_FAILURE:-}" '
       . as $fixture |
       {
-        Parameters: [$fixture.Parameters[]? | select(.Name as $name | ($requested | index($name)) != null)],
+        Parameters: [$fixture.Parameters[]? | select(.Name as $name | ($requested | index($name)) != null)
+          | if $failure == "invalid_security_group_id" and .Name == "/auto-shop/staging/database/security-group-id" then .Value = "invalid" else . end],
         InvalidParameters: [$requested[] as $name | select(any($fixture.Parameters[]?; .Name == $name) | not)]
       }
     ' "$SMOKE_FIXTURE_DIR/parameters.json"
@@ -423,6 +424,16 @@ cmp -s "$tmp_dir/expected-ssm-batches.log" "$tmp_dir/smoke-ssm-failure-batches.l
 record_critical_branch smoke_ssm_second_batch_failure
 if grep -Fq 'CANARY_SECRET_VALUE' "$tmp_dir/smoke-ssm-failure.out"; then
   fail 'SSM batch failure leaked a canary value'
+fi
+
+if SMOKE_TEST_FAILURE=invalid_security_group_id \
+  SMOKE_FIXTURE_DIR="$tmp_dir/smoke-fixtures" ORCHESTRATION_TEST_SSM_BATCH_LOG="$tmp_dir/smoke-invalid-sg-batches.log" AWS_BIN="$tmp_dir/bin/smoke-aws" \
+  TMPDIR="${TMPDIR:-/tmp}" bash "$repo_root/scripts/smoke.sh" initial > "$tmp_dir/smoke-invalid-sg.out" 2>&1; then
+  fail 'initial smoke accepted an invalid published security group ID'
+else
+  status=$?
+  [[ "$status" -eq 1 ]] || fail "invalid security group ID returned $status instead of a closed failure"
+  grep -Fq 'published database security group ID is invalid' "$tmp_dir/smoke-invalid-sg.out" || fail 'invalid security group ID was not rejected at the published contract boundary'
 fi
 
 if bash "$repo_root/scripts/smoke.sh" invalid-phase > "$tmp_dir/smoke-invalid-phase.out" 2>&1; then
