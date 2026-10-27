@@ -371,9 +371,21 @@ case "$arguments" in
       }
     ' "$SMOKE_FIXTURE_DIR/parameters.json"
     ;;
-  *"rds describe-db-instances"*) cat "$SMOKE_FIXTURE_DIR/instance.json" ;;
+  *"rds describe-db-instances"*)
+    if [[ "${SMOKE_TEST_FAILURE:-}" == invalid_rds_contract ]]; then
+      jq '.DBInstances[0].PubliclyAccessible = true' "$SMOKE_FIXTURE_DIR/instance.json"
+    else
+      cat "$SMOKE_FIXTURE_DIR/instance.json"
+    fi
+    ;;
   *"ssm get-parameter"*) cat "$SMOKE_FIXTURE_DIR/upstream-subnets.json" ;;
-  *"rds describe-db-subnet-groups"*) cat "$SMOKE_FIXTURE_DIR/subnet-group.json" ;;
+  *"rds describe-db-subnet-groups"*)
+    if [[ "${SMOKE_TEST_FAILURE:-}" == mismatched_subnet_group ]]; then
+      jq '.DBSubnetGroups[0].Subnets[0].SubnetIdentifier = "subnet-other"' "$SMOKE_FIXTURE_DIR/subnet-group.json"
+    else
+      cat "$SMOKE_FIXTURE_DIR/subnet-group.json"
+    fi
+    ;;
   *"ec2 describe-security-groups"*) cat "$SMOKE_FIXTURE_DIR/security-group.json" ;;
   *"ec2 describe-route-tables"*) cat "$SMOKE_FIXTURE_DIR/routes.json" ;;
   *"secretsmanager list-secret-version-ids"*)
@@ -409,6 +421,26 @@ fi
 record_critical_branch smoke_partial_metadata_failure
 if grep -Fq 'CANARY_SECRET_VALUE' "$tmp_dir/smoke-partial-failure.out"; then
   fail 'partial smoke failure leaked a canary value'
+fi
+
+if SMOKE_TEST_FAILURE=invalid_rds_contract \
+  SMOKE_FIXTURE_DIR="$tmp_dir/smoke-fixtures" ORCHESTRATION_TEST_SSM_BATCH_LOG="$tmp_dir/smoke-invalid-rds-batches.log" AWS_BIN="$tmp_dir/bin/smoke-aws" \
+  TMPDIR="${TMPDIR:-/tmp}" bash "$repo_root/scripts/smoke.sh" initial > "$tmp_dir/smoke-invalid-rds.out" 2>&1; then
+  fail 'initial smoke accepted a publicly accessible RDS instance'
+else
+  status=$?
+  [[ "$status" -eq 1 ]] || fail "invalid RDS contract returned $status instead of a closed failure"
+  grep -Fq 'RDS is available, private, encrypted PostgreSQL 16.15 Single-AZ with one-day retention invariant failed' "$tmp_dir/smoke-invalid-rds.out" || fail 'invalid RDS contract was not rejected'
+fi
+
+if SMOKE_TEST_FAILURE=mismatched_subnet_group \
+  SMOKE_FIXTURE_DIR="$tmp_dir/smoke-fixtures" ORCHESTRATION_TEST_SSM_BATCH_LOG="$tmp_dir/smoke-invalid-subnet-batches.log" AWS_BIN="$tmp_dir/bin/smoke-aws" \
+  TMPDIR="${TMPDIR:-/tmp}" bash "$repo_root/scripts/smoke.sh" initial > "$tmp_dir/smoke-invalid-subnet.out" 2>&1; then
+  fail 'initial smoke accepted a subnet group that differs from the upstream subnet list'
+else
+  status=$?
+  [[ "$status" -eq 1 ]] || fail "invalid subnet group returned $status instead of a closed failure"
+  grep -Fq 'RDS subnet group does not match the upstream isolated subnet list' "$tmp_dir/smoke-invalid-subnet.out" || fail 'invalid subnet group was not rejected'
 fi
 
 if SMOKE_TEST_FAILURE=ssm_second_batch \
