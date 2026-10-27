@@ -1,0 +1,92 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: auto-shop-db-bootstrap
+  namespace: auto-shop-ops
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 600
+  ttlSecondsAfterFinished: 300
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: auto-shop-db-bootstrap
+    spec:
+      serviceAccountName: auto-shop-db-bootstrap
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      volumes:
+        - name: work
+          emptyDir:
+            medium: Memory
+            sizeLimit: 8Mi
+        - name: bootstrap-code
+          configMap:
+            name: auto-shop-db-bootstrap-sql
+            defaultMode: 0444
+      initContainers:
+        - name: fetch
+          image: &awsCliImage docker.io/amazon/aws-cli:2.38.2@sha256:5d39fd52f236ed01c5c25fba66c9aebcfc6cbb88e7bb1b727c5fe1f150540597
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/bash", "/bootstrap/fetch.sh"]
+          envFrom:
+            - configMapRef:
+                name: auto-shop-db-bootstrap-settings
+          securityContext: &containerSecurity
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests: { cpu: 25m, memory: 64Mi }
+            limits: { cpu: 250m, memory: 256Mi }
+          volumeMounts: &containerMounts
+            - { name: work, mountPath: /work }
+            - { name: bootstrap-code, mountPath: /bootstrap, readOnly: true }
+        - name: resolve
+          image: docker.io/library/python:3.12.15-slim-bookworm@sha256:6a0e06f5ba0b373d051aabd3fffb9b873f27f9a2a3a14bcbe37dee6f0e3bbc70
+          imagePullPolicy: IfNotPresent
+          command: ["python3", "/bootstrap/resolve.py"]
+          envFrom:
+            - configMapRef:
+                name: auto-shop-db-bootstrap-settings
+          securityContext: *containerSecurity
+          resources:
+            requests: { cpu: 25m, memory: 64Mi }
+            limits: { cpu: 250m, memory: 256Mi }
+          volumeMounts: *containerMounts
+        - name: psql
+          image: docker.io/library/postgres:16@sha256:9e2cf6287f25c3151f4c9421ccce2b17f3e60061c111a29165e0d2cdd9ff0a97
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/bash", "/bootstrap/psql.sh"]
+          envFrom:
+            - configMapRef:
+                name: auto-shop-db-bootstrap-settings
+          securityContext: *containerSecurity
+          resources:
+            requests: { cpu: 25m, memory: 64Mi }
+            limits: { cpu: 250m, memory: 128Mi }
+          volumeMounts: *containerMounts
+      containers:
+        - name: publish
+          image: *awsCliImage
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/bash", "/bootstrap/publish.sh"]
+          envFrom:
+            - configMapRef:
+                name: auto-shop-db-bootstrap-settings
+          securityContext: *containerSecurity
+          resources:
+            requests: { cpu: 25m, memory: 64Mi }
+            limits: { cpu: 250m, memory: 256Mi }
+          volumeMounts: *containerMounts

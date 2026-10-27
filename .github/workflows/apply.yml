@@ -1,0 +1,151 @@
+name: Apply database staging
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      session_id:
+        description: Active staging session identifier from the protected staging environment
+        required: true
+        type: string
+      phase:
+        description: Bootstrap credentials before migrations, or apply the Lambda grants after migrations
+        required: true
+        type: choice
+        options: [bootstrap, grants]
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: staging-database
+  cancel-in-progress: false
+
+env:
+  TF_VERSION: 1.15.8
+  TF_IN_AUTOMATION: "true"
+
+jobs:
+  apply:
+    name: apply ephemeral staging database
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: staging
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Require an explicitly authorized staging session
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          STAGING_ACTIVE: ${{ vars.STAGING_ACTIVE }}
+          STAGING_SESSION_AUTHORIZED: ${{ vars.STAGING_SESSION_AUTHORIZED }}
+          ACTIVE_SESSION_ID: ${{ vars.STAGING_SESSION_ID }}
+          REQUESTED_SESSION_ID: ${{ inputs.session_id }}
+        run: |
+          set -euo pipefail
+          if [[ "$STAGING_ACTIVE" != "true" || "$STAGING_SESSION_AUTHORIZED" != "true" || -z "$ACTIVE_SESSION_ID" ]]; then
+            echo "::error::A protected, explicitly authorized staging session is required."
+            exit 1
+          fi
+          if [[ "$EVENT_NAME" == "workflow_dispatch" && "$REQUESTED_SESSION_ID" != "$ACTIVE_SESSION_ID" ]]; then
+            echo "::error::The requested session does not match the active authorized session."
+            exit 1
+          fi
+
+      - name: Validate the pinned bootstrap bundle before OIDC
+        run: ./scripts/bootstrap-db.sh verify
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: us-east-1
+          role-duration-seconds: 3600
+
+      - name: Preflight boundary, account, SSM, and EKS contracts
+        run: |
+          set -euo pipefail
+          umask 077
+          temp_dir="$(mktemp -d "$RUNNER_TEMP/database-preflight.XXXXXX")"
+          chmod 700 "$temp_dir"
+          trap 'rm -rf "$temp_dir"' EXIT
+          if ! aws sts get-caller-identity --query Account --output text > "$temp_dir/account.txt" 2> "$temp_dir/account.stderr"; then
+            echo "::error::AWS caller identity preflight failed."
+            exit 1
+          fi
+          if [[ "$(cat "$temp_dir/account.txt")" != "035611741563" ]]; then
+            echo "::error::The deploy role resolved to an unexpected AWS account."
+            exit 1
+          fi
+          if ! aws iam get-policy --policy-arn arn:aws:iam::035611741563:policy/auto-shop/auto-shop-boundary > "$temp_dir/boundary.json" 2> "$temp_dir/boundary.stderr"; then
+            echo "::error::The required permissions boundary is unavailable; no Terraform apply was started."
+            exit 1
+          fi
+          required_parameters=(
+            "/auto-shop/staging/network/vpc-id"
+            "/auto-shop/staging/network/rds-isolated-subnet-ids"
+            "/auto-shop/staging/network/eks-node-security-group-id"
+            "/auto-shop/staging/network/lambda-security-group-id"
+            "/auto-shop/staging/eks/cluster-name"
+          )
+          if ! aws ssm get-parameters --names "${required_parameters[@]}" --query 'InvalidParameters' --output json > "$temp_dir/invalid.json" 2> "$temp_dir/ssm.stderr"; then
+            echo "::error::SSM contract preflight failed."
+            exit 1
+          fi
+          if [[ "$(jq -r 'length' "$temp_dir/invalid.json")" -ne 0 ]]; then
+            echo "::error::One or more required upstream SSM contracts are absent."
+            exit 1
+          fi
+          if ! aws ssm get-parameter --name /auto-shop/staging/eks/cluster-name --query 'Parameter.Value' --output text > "$temp_dir/cluster.txt" 2> "$temp_dir/cluster-parameter.stderr"; then
+            echo "::error::The exact EKS cluster-name contract is unreadable."
+            exit 1
+          fi
+          if ! aws eks describe-cluster --name "$(cat "$temp_dir/cluster.txt")" > "$temp_dir/cluster.json" 2> "$temp_dir/cluster.stderr"; then
+            echo "::error::The upstream EKS cluster preflight failed."
+            exit 1
+          fi
+
+      - name: Apply one guarded saved plan and run the requested phase
+        env:
+          PHASE: ${{ inputs.phase || 'bootstrap' }}
+        run: |
+          set -euo pipefail
+          umask 077
+          stack="envs/staging/database"
+          temp_dir="$(mktemp -d "$RUNNER_TEMP/database-apply.XXXXXX")"
+          chmod 700 "$temp_dir"
+          trap 'rm -rf "$temp_dir"' EXIT
+          if ! terraform -chdir="$stack" init -input=false -lock-timeout=300s > "$temp_dir/init.log" 2>&1; then
+            echo "::error::Terraform init failed; private diagnostics were discarded."
+            exit 1
+          fi
+          if ! terraform -chdir="$stack" plan -input=false -lock-timeout=300s -out="$temp_dir/plan.tfplan" > "$temp_dir/plan.log" 2>&1; then
+            echo "::error::Terraform plan failed; private diagnostics were discarded."
+            exit 1
+          fi
+          if ! terraform -chdir="$stack" show -json "$temp_dir/plan.tfplan" > "$temp_dir/plan.json" 2> "$temp_dir/show.stderr"; then
+            echo "::error::Terraform could not produce the guarded plan JSON."
+            exit 1
+          fi
+          ./scripts/plan-summary.sh "$temp_dir/plan.json" >> "$GITHUB_STEP_SUMMARY"
+          ./scripts/plan-guard.sh "$temp_dir/plan.json" >> "$GITHUB_STEP_SUMMARY"
+          if ! terraform -chdir="$stack" apply -input=false -auto-approve -lock-timeout=300s "$temp_dir/plan.tfplan" > "$temp_dir/apply.log" 2>&1; then
+            echo "::error::Terraform apply failed; private diagnostics were discarded."
+            exit 1
+          fi
+          echo "Terraform apply completed from the guarded saved plan." >> "$GITHUB_STEP_SUMMARY"
+          ./scripts/bootstrap-db.sh "$PHASE"
+          if [[ "$PHASE" == "bootstrap" ]]; then
+            ./scripts/smoke.sh initial | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            ./scripts/smoke.sh full | tee -a "$GITHUB_STEP_SUMMARY"
+          fi

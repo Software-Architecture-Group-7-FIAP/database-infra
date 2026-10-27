@@ -1,0 +1,250 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    - cron: "17 7 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TF_VERSION: 1.15.8
+  TF_IN_AUTOMATION: "true"
+
+jobs:
+  environment-policy:
+    name: staging deployment branch policy
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+    steps:
+      - name: Verify staging only allows deployments from main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          environment_url="repos/${GITHUB_REPOSITORY}/environments/staging"
+          deployment_policy="$(gh api "$environment_url" --jq '.deployment_branch_policy | [.custom_branch_policies, .protected_branches] | @json')"
+          if [[ "$deployment_policy" != '[true,false]' ]]; then
+            echo "::error::The staging environment must use a custom deployment policy, not protected-branch wildcards."
+            exit 1
+          fi
+          allowed_branches="$(gh api --paginate "$environment_url/deployment-branch-policies" --jq '.branch_policies[].name' | sort)"
+          if [[ "$allowed_branches" != 'main' ]]; then
+            echo "::error::The staging environment must allow exactly the main branch."
+            exit 1
+          fi
+
+  static:
+    name: Terraform and shell checks
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: terraform fmt
+        run: terraform fmt -check -recursive -diff
+
+      - name: terraform validate (roots, no backend)
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          roots=(envs/staging/*/)
+          [[ ${#roots[@]} -gt 0 ]] || { echo "::error::No staging Terraform root found."; exit 1; }
+          for dir in "${roots[@]}"; do
+            echo "::group::validate $dir"
+            terraform -chdir="$dir" init -backend=false -input=false >/dev/null
+            terraform -chdir="$dir" validate
+            echo "::endgroup::"
+          done
+
+      - name: terraform test (mocked modules)
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          modules=(modules/*/)
+          [[ ${#modules[@]} -gt 0 ]] || { echo "::error::No Terraform modules found."; exit 1; }
+          for dir in "${modules[@]}"; do
+            echo "::group::test $dir"
+            terraform -chdir="$dir" init -backend=false -input=false >/dev/null
+            terraform -chdir="$dir" test
+            echo "::endgroup::"
+          done
+
+      - name: terraform test (root SSM sensitivity regression)
+        run: terraform -chdir=envs/staging/database test
+
+      - uses: terraform-linters/setup-tflint@6ffdbaa3be476b3431f7275c26966ef32ff60337 # v6.3.2
+        with:
+          tflint_version: v0.65.0
+
+      - name: tflint
+        run: |
+          tflint --init
+          tflint --recursive --config "$GITHUB_WORKSPACE/.tflint.hcl"
+
+      - uses: bridgecrewio/checkov-action@99bb2caf247dfd9f03cf984373bc6043d4e32ebf # v12.1347.0
+        name: checkov
+        with:
+          directory: .
+          framework: terraform
+          config_file: .checkov.yaml
+          quiet: true
+
+      - name: shellcheck
+        run: shellcheck scripts/*.sh tests/*.sh
+
+      - name: Install ripgrep for local contract checks
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes ripgrep
+
+      - name: local contract tests
+        run: |
+          set -euo pipefail
+          bash tests/root-contract.sh
+          bash tests/plan-guard.sh
+          bash tests/script-contracts.sh
+          bash tests/workflow-contract.sh
+
+  sql:
+    name: PostgreSQL permission integration
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: local-test-only
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      PGHOST: 127.0.0.1
+      PGPORT: 5432
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: local-test-only
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install PostgreSQL client and pinned kcov v42
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes postgresql-client ripgrep python3
+          kcov_dir="$RUNNER_TEMP/kcov-v42"
+          mkdir -p "$kcov_dir"
+          curl --fail --location --silent --show-error \
+            https://github.com/SimonKagstrom/kcov/releases/download/v42/kcov-amd64.tar.gz \
+            --output "$RUNNER_TEMP/kcov-amd64.tar.gz"
+          tar -xzf "$RUNNER_TEMP/kcov-amd64.tar.gz" -C "$kcov_dir"
+          echo "$kcov_dir/usr/local/bin" >> "$GITHUB_PATH"
+
+      - name: SQL integration and measured shell coverage
+        run: bash tests/shell-coverage.sh
+
+  plan:
+    name: Read-only staging plan
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    needs: [static, sql]
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_PLAN_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Check upstream contracts
+        id: upstream
+        run: |
+          set -euo pipefail
+          umask 077
+          temp_dir="$(mktemp -d "$RUNNER_TEMP/database-upstream.XXXXXX")"
+          trap 'rm -rf "$temp_dir"' EXIT
+          required_parameters=(
+            "/auto-shop/staging/network/vpc-id"
+            "/auto-shop/staging/network/rds-isolated-subnet-ids"
+            "/auto-shop/staging/network/eks-node-security-group-id"
+            "/auto-shop/staging/network/lambda-security-group-id"
+            "/auto-shop/staging/eks/cluster-name"
+          )
+          if ! aws ssm get-parameters --names "${required_parameters[@]}" --query 'InvalidParameters' --output json > "$temp_dir/invalid.json" 2> "$temp_dir/ssm.stderr"; then
+            echo "::error::SSM preflight failed; access or network errors are not treated as missing contracts."
+            exit 1
+          fi
+          if [[ "$(jq -r 'length' "$temp_dir/invalid.json")" -ne 0 ]]; then
+            echo "### database: skipped (upstream SSM contract is not published)" >> "$GITHUB_STEP_SUMMARY"
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! aws ssm get-parameter --name /auto-shop/staging/eks/cluster-name --query 'Parameter.Value' --output text > "$temp_dir/cluster.txt" 2> "$temp_dir/cluster-parameter.stderr"; then
+            echo "::error::The exact EKS cluster-name contract could not be read."
+            exit 1
+          fi
+          cluster_name="$(cat "$temp_dir/cluster.txt")"
+          if aws eks describe-cluster --name "$cluster_name" > "$temp_dir/cluster.json" 2> "$temp_dir/cluster.stderr"; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          elif grep -q 'ResourceNotFoundException' "$temp_dir/cluster.stderr"; then
+            echo "### database: skipped (the upstream EKS cluster is not present)" >> "$GITHUB_STEP_SUMMARY"
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::EKS preflight failed for a reason other than an absent cluster."
+            exit 1
+          fi
+
+      - name: Plan, summarize, and guard one saved plan
+        if: steps.upstream.outputs.ready == 'true'
+        run: |
+          set -euo pipefail
+          umask 077
+          stack="envs/staging/database"
+          temp_dir="$(mktemp -d "$RUNNER_TEMP/database-plan.XXXXXX")"
+          chmod 700 "$temp_dir"
+          trap 'rm -rf "$temp_dir"' EXIT
+          if ! terraform -chdir="$stack" init -input=false -lock-timeout=120s > "$temp_dir/init.log" 2>&1; then
+            echo "::error::Terraform init failed; private diagnostic output was discarded."
+            exit 1
+          fi
+          if ! terraform -chdir="$stack" plan -input=false -lock-timeout=120s -out="$temp_dir/plan.tfplan" > "$temp_dir/plan.log" 2>&1; then
+            echo "::error::Terraform plan failed; private diagnostic output was discarded."
+            exit 1
+          fi
+          if ! terraform -chdir="$stack" show -json "$temp_dir/plan.tfplan" > "$temp_dir/plan.json" 2> "$temp_dir/show.stderr"; then
+            echo "::error::Terraform could not produce the guarded plan JSON."
+            exit 1
+          fi
+          ./scripts/plan-summary.sh "$temp_dir/plan.json" >> "$GITHUB_STEP_SUMMARY"
+          ./scripts/plan-guard.sh "$temp_dir/plan.json" >> "$GITHUB_STEP_SUMMARY"
