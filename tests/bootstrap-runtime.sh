@@ -81,7 +81,15 @@ case "$*" in
     printf 'apiVersion: v1\nkind: ConfigMap\n'
     ;;
   *'apply -f '*)
-    [[ "${BOOTSTRAP_KUBECTL_MODE:-success}" != fail-apply ]] || exit 1
+    if [[ "${BOOTSTRAP_KUBECTL_MODE:-success}" == fail-apply && "$*" == *'/serviceaccount.yaml'* ]]; then
+      exit 1
+    fi
+    if [[ "${BOOTSTRAP_KUBECTL_MODE:-success}" == fail-sql-configmap-apply && "$*" == *'/sql-configmap.yaml'* ]]; then
+      exit 1
+    fi
+    if [[ "${BOOTSTRAP_KUBECTL_MODE:-success}" == fail-settings-configmap-apply && "$*" == *'/settings-configmap.yaml'* ]]; then
+      exit 1
+    fi
     if [[ "${BOOTSTRAP_KUBECTL_MODE:-success}" == fail-job-apply && "$*" == *'/bootstrap/job.yaml'* ]]; then
       exit 1
     fi
@@ -221,8 +229,12 @@ expect_bootstrap_failure sql_configmap_failure 'bootstrap source ConfigMap could
   "$BOOTSTRAP_SSM_FIXTURE" 035611741563 false fail-sql-configmap
 expect_bootstrap_failure settings_configmap_failure 'bootstrap settings ConfigMap could not be rendered' \
   "$BOOTSTRAP_SSM_FIXTURE" 035611741563 false fail-settings-configmap
-expect_bootstrap_failure resource_apply_failure 'bootstrap ServiceAccount or ConfigMap could not be applied' \
+expect_bootstrap_failure serviceaccount_apply_failure 'bootstrap ServiceAccount apply failed' \
   "$BOOTSTRAP_SSM_FIXTURE" 035611741563 false fail-apply
+expect_bootstrap_failure sql_configmap_apply_failure 'bootstrap source ConfigMap apply failed' \
+  "$BOOTSTRAP_SSM_FIXTURE" 035611741563 false fail-sql-configmap-apply
+expect_bootstrap_failure settings_configmap_apply_failure 'bootstrap settings ConfigMap apply failed' \
+  "$BOOTSTRAP_SSM_FIXTURE" 035611741563 false fail-settings-configmap-apply
 expect_bootstrap_failure job_apply_failure 'bootstrap Job could not be applied' \
   "$BOOTSTRAP_SSM_FIXTURE" 035611741563 false fail-job-apply
 expect_bootstrap_failure job_status_failure 'bootstrap Job status could not be read' \
