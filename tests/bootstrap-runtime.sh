@@ -33,7 +33,24 @@ case "$*" in
     if [[ "${BOOTSTRAP_AWS_MODE:-success}" == fail-ssm ]]; then
       exit 1
     fi
-    cat "$BOOTSTRAP_SSM_FIXTURE"
+    requested_names=()
+    collecting_names=false
+    for argument in "$@"; do
+      if [[ "$collecting_names" == true ]]; then
+        [[ "$argument" == --output ]] && break
+        requested_names+=("$argument")
+      elif [[ "$argument" == --names ]]; then
+        collecting_names=true
+      fi
+    done
+    requested_names_json="$(printf '%s\n' "${requested_names[@]}" | jq -R . | jq -s .)"
+    jq --argjson requested "$requested_names_json" '
+      . as $fixture |
+      {
+        Parameters: [$fixture.Parameters[]? | select(.Name as $name | ($requested | index($name)) != null)],
+        InvalidParameters: [$requested[] as $name | select(any($fixture.Parameters[]?; .Name == $name) | not)]
+      }
+    ' "$BOOTSTRAP_SSM_FIXTURE"
     ;;
   'eks update-kubeconfig '*)
     [[ "${BOOTSTRAP_AWS_FAIL_KUBECONFIG:-false}" != true ]]
