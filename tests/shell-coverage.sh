@@ -52,10 +52,9 @@ awk -v percentage="$coverage_percent" 'BEGIN { exit !(percentage >= 80) }' \
     printf 'Per-file shell coverage:\n' >&2
     "$jq_bin" -r '.files[] | "\(.percent_covered)%\t\(.covered_lines)/\(.total_lines)\t\(.file)"' \
       "$coverage_json" >&2
-    coverage_xml="$(find "$merged_output" -type f -name '*.xml' -print -quit)"
-    if [[ -n "$coverage_xml" ]]; then
+    if find "$merged_output" -type f -name '*.xml' -print -quit | grep -q .; then
       printf 'Uncovered executable shell lines:\n' >&2
-      python3 - "$coverage_xml" <<'PY' >&2
+      python3 - "$merged_output" <<'PY' >&2
 import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -69,17 +68,36 @@ expected = {
     "ssm-get-parameters.sh",
 }
 found = set()
-for coverage_class in ET.parse(sys.argv[1]).iter("class"):
-    filename = Path(coverage_class.get("filename", "")).name
-    if filename not in expected:
+reports = sorted(Path(sys.argv[1]).rglob("*.xml"))
+for report in reports:
+    try:
+        root = ET.parse(report).getroot()
+    except ET.ParseError as exc:
+        print(f"{report.name}: invalid XML ({exc})")
         continue
-    found.add(filename)
-    missed = [
-        line.get("number", "?")
-        for line in coverage_class.iter("line")
-        if int(line.get("hits", "0")) == 0
-    ]
-    print(f"{filename}: {', '.join(missed) if missed else 'none'}")
+
+    classes = [element for element in root.iter() if element.tag.rsplit("}", 1)[-1] == "class"]
+    matching_classes = []
+    for coverage_class in classes:
+        filename = Path(coverage_class.get("filename", "")).name
+        if filename in expected:
+            matching_classes.append((filename, coverage_class))
+
+    for filename, coverage_class in matching_classes:
+        found.add(filename)
+        missed = sorted({
+            line.get("number", "?")
+            for line in coverage_class.iter()
+            if line.tag.rsplit("}", 1)[-1] == "line" and int(line.get("hits", "0")) == 0
+        }, key=lambda number: int(number) if number.isdigit() else -1)
+        print(f"{filename}: {', '.join(missed) if missed else 'none'}")
+
+    if not matching_classes:
+        names = [
+            Path(element.get("filename", "")).name or element.get("name", "?")
+            for element in classes[:12]
+        ]
+        print(f"{report.name}: root={root.tag}, classes={len(classes)}, sample={', '.join(names)}")
 
 for filename in sorted(expected - found):
     print(f"{filename}: no Cobertura class found")
