@@ -68,6 +68,7 @@ expected = {
     "ssm-get-parameters.sh",
 }
 found = set()
+uncovered = {filename: set() for filename in expected}
 reports = sorted(Path(sys.argv[1]).rglob("*.xml"))
 for report in reports:
     try:
@@ -76,28 +77,35 @@ for report in reports:
         print(f"{report.name}: invalid XML ({exc})")
         continue
 
-    classes = [element for element in root.iter() if element.tag.rsplit("}", 1)[-1] == "class"]
-    matching_classes = []
-    for coverage_class in classes:
-        filename = Path(coverage_class.get("filename", "")).name
-        if filename in expected:
-            matching_classes.append((filename, coverage_class))
+    matched_in_report = set()
+    for element in root.iter():
+        tag = element.tag.rsplit("}", 1)[-1]
+        if tag == "class":
+            filename = element.get("filename", "")
+        elif tag == "file":
+            filename = element.get("path", "")
+        else:
+            continue
 
-    for filename, coverage_class in matching_classes:
+        filename = filename.replace("\\", "/").rsplit("/", 1)[-1]
+        if filename not in expected:
+            continue
+
         found.add(filename)
-        missed = sorted({
-            line.get("number", "?")
-            for line in coverage_class.iter()
-            if line.tag.rsplit("}", 1)[-1] == "line" and int(line.get("hits", "0")) == 0
-        }, key=lambda number: int(number) if number.isdigit() else -1)
-        print(f"{filename}: {', '.join(missed) if missed else 'none'}")
+        matched_in_report.add(filename)
+        for line in element.iter():
+            line_tag = line.tag.rsplit("}", 1)[-1]
+            if line_tag == "line" and int(line.get("hits", "0")) == 0:
+                uncovered[filename].add(line.get("number", "?"))
+            elif line_tag == "lineToCover" and line.get("covered") == "false":
+                uncovered[filename].add(line.get("lineNumber", "?"))
 
-    if not matching_classes:
-        names = [
-            Path(element.get("filename", "")).name or element.get("name", "?")
-            for element in classes[:12]
-        ]
-        print(f"{report.name}: root={root.tag}, classes={len(classes)}, sample={', '.join(names)}")
+    if not matched_in_report:
+        print(f"{report.name}: root={root.tag}, no matching source files")
+
+for filename in sorted(found):
+    missed = sorted(uncovered[filename], key=lambda number: int(number) if number.isdigit() else -1)
+    print(f"{filename}: {', '.join(missed) if missed else 'none'}")
 
 for filename in sorted(expected - found):
     print(f"{filename}: no Cobertura class found")
