@@ -25,7 +25,10 @@ rg -q 'isolated_subnet_ids[[:space:]]*=[[:space:]]*nonsensitive\(' "$root/main.t
 role_count="$(grep -Ec '^resource "aws_iam_role"' "$root/main.tf")"
 [[ "$role_count" -eq 1 ]] || fail 'the database root must create exactly one IAM role'
 policy_count="$(grep -Ec '^resource "aws_iam_policy"' "$root/main.tf")"
-[[ "$policy_count" -eq 3 ]] || fail 'the database root must create exactly three consumer policies'
+[[ "$policy_count" -eq 4 ]] || fail 'the database root must create four isolated consumer policies'
+for policy in migration_hml_secret_read migration_prd_secret_read lambda_hml_secret_read lambda_prd_secret_read; do
+  grep -Fq "resource \"aws_iam_policy\" \"$policy\"" "$root/main.tf" || fail "the $policy consumer policy is missing"
+done
 grep -Fq 'permissions_boundary = local.boundary_arn' "$root/main.tf" || fail 'bootstrap role permissions boundary is missing'
 grep -Fq '"pods.eks.amazonaws.com"' "$root/main.tf" || fail 'Pod Identity trust principal is missing'
 grep -Fq 'variable = "aws:SourceArn"' "$root/main.tf" || fail 'Pod Identity source ARN condition is missing'
