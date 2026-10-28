@@ -206,6 +206,7 @@ run_guard "$tmp_dir/refreshed_security_group.json" > "$tmp_dir/refreshed_securit
 grep -Fq 'PASS' "$tmp_dir/refreshed_security_group.out" || { printf 'FAIL: refreshed standalone ingress rules were rejected as inline rules\n' >&2; exit 1; }
 
 expect_rejected public_db '.resource_changes[0].change.after.publicly_accessible = true'
+grep -Fq 'rds_invalid_fields:publicly_accessible' "$tmp_dir/public_db.out" || { printf 'FAIL: RDS invariant diagnostics did not identify the failing property without values\n' >&2; exit 1; }
 expect_rejected cmk_configured '.resource_changes[0].change.after.kms_key_id = "arn:aws:kms:us-east-1:035611741563:key/customer-managed" | .configuration.root_module.module_calls.instance.module.resources[0].expressions.kms_key_id = {constant_value:"arn:aws:kms:us-east-1:035611741563:key/customer-managed"}'
 expect_rejected public_db_create_then_delete '.resource_changes[0].change.actions = ["create", "delete"] | .resource_changes[0].change.after.publicly_accessible = true'
 expect_rejected public_db_delete_then_create '.resource_changes[0].change.actions = ["delete", "create"] | .resource_changes[0].change.after.publicly_accessible = true'
@@ -228,6 +229,7 @@ expect_rejected dsn_in_ssm '.resource_changes[4].change.after.value = "postgresq
 expect_rejected password_in_ssm '.resource_changes[4].change.after.value = "password=CANARY_SECRET_VALUE"'
 expect_rejected dsn_in_output '.output_changes.db_host.after = "postgresql://app:CANARY_SECRET_VALUE@db.example/autoshop_hml"'
 expect_rejected unknown_rds_public_flag '.resource_changes[0].change.after_unknown.publicly_accessible = true'
+grep -Fq 'rds_invalid_fields:publicly_accessible_unknown' "$tmp_dir/unknown_rds_public_flag.out" || { printf 'FAIL: unknown RDS invariant diagnostics did not identify the property without values\n' >&2; exit 1; }
 expect_rejected rds_deletion '.resource_changes[0].change.actions = ["delete"] | .resource_changes[0].change.after = null'
 grep -Fq 'rds_deletion_prohibited' "$tmp_dir/rds_deletion.out" || { printf 'FAIL: pure RDS deletion did not report the dedicated guard violation\n' >&2; exit 1; }
 
