@@ -52,6 +52,68 @@ awk -v percentage="$coverage_percent" 'BEGIN { exit !(percentage >= 80) }' \
     printf 'Per-file shell coverage:\n' >&2
     "$jq_bin" -r '.files[] | "\(.percent_covered)%\t\(.covered_lines)/\(.total_lines)\t\(.file)"' \
       "$coverage_json" >&2
+    if find "$merged_output" -type f -name '*.xml' -print -quit | grep -q .; then
+      printf 'Uncovered executable shell lines:\n' >&2
+      python3 - "$merged_output" <<'PY' >&2
+import sys
+import xml.etree.ElementTree as ET
+from pathlib import Path
+
+expected = {
+    "bootstrap-db.sh",
+    "orphans.sh",
+    "plan-guard.sh",
+    "plan-summary.sh",
+    "private-tmp.sh",
+    "smoke.sh",
+    "ssm-get-parameters.sh",
+}
+found = set()
+uncovered = {filename: set() for filename in expected}
+reports = sorted(Path(sys.argv[1]).rglob("*.xml"))
+for report in reports:
+    try:
+        root = ET.parse(report).getroot()
+    except ET.ParseError as exc:
+        print(f"{report.name}: invalid XML ({exc})")
+        continue
+
+    matched_in_report = set()
+    for element in root.iter():
+        tag = element.tag.rsplit("}", 1)[-1]
+        if tag == "class":
+            filename = element.get("filename", "")
+        elif tag == "file":
+            filename = element.get("path", "")
+        else:
+            continue
+
+        filename = filename.replace("\\", "/").rsplit("/", 1)[-1]
+        if filename not in expected:
+            continue
+
+        found.add(filename)
+        matched_in_report.add(filename)
+        for line in element.iter():
+            line_tag = line.tag.rsplit("}", 1)[-1]
+            if line_tag == "line" and int(line.get("hits", "0")) == 0:
+                uncovered[filename].add(line.get("number", "?"))
+            elif line_tag == "lineToCover" and line.get("covered") == "false":
+                uncovered[filename].add(line.get("lineNumber", "?"))
+
+    if not matched_in_report:
+        print(f"{report.name}: root={root.tag}, no matching source files")
+
+for filename in sorted(found):
+    missed = sorted(uncovered[filename], key=lambda number: int(number) if number.isdigit() else -1)
+    print(f"{filename}: {', '.join(missed) if missed else 'none'}")
+
+for filename in sorted(expected - found):
+    print(f"{filename}: no Cobertura class found")
+PY
+    else
+      printf 'Kcov did not produce a Cobertura XML report.\n' >&2
+    fi
     fail "executable shell line coverage ${coverage_percent}% is below the required 80%"
   }
 

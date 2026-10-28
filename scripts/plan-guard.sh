@@ -109,8 +109,44 @@ violations="$("$jq_bin" -r '
     ($resource.change.after.backup_retention_period != 1) or
     ($resource.change.after.manage_master_user_password != true) or
     ($resource.change.after.password != null) or
-    ($resource.change.after.db_name != null) or
+    ($resource.change.after.db_name != null and $resource.change.after.db_name != "") or
     ($resource.change.after.username != "autoshop_owner");
+  def rds_invalid_fields($plan; $resource):
+    [
+      if ($resource | unknown("publicly_accessible")) then "publicly_accessible_unknown" else empty end,
+      if ($resource | unknown("storage_encrypted")) then "storage_encrypted_unknown" else empty end,
+      if ($resource | unknown("engine")) then "engine_unknown" else empty end,
+      if ($resource | unknown("engine_version")) then "engine_version_unknown" else empty end,
+      if ($resource | unknown("instance_class")) then "instance_class_unknown" else empty end,
+      if ($resource | unknown("allocated_storage")) then "allocated_storage_unknown" else empty end,
+      if ($resource | unknown("storage_type")) then "storage_type_unknown" else empty end,
+      if ($resource | unknown("max_allocated_storage")) then "max_allocated_storage_unknown" else empty end,
+      if ($resource | unknown("multi_az")) then "multi_az_unknown" else empty end,
+      if ($resource | unknown("deletion_protection")) then "deletion_protection_unknown" else empty end,
+      if ($resource | unknown("skip_final_snapshot")) then "skip_final_snapshot_unknown" else empty end,
+      if ($resource | unknown("delete_automated_backups")) then "delete_automated_backups_unknown" else empty end,
+      if ($resource | unknown("backup_retention_period")) then "backup_retention_period_unknown" else empty end,
+      if ($resource | unknown("manage_master_user_password")) then "manage_master_user_password_unknown" else empty end,
+      if ($resource | unknown("password")) then "password_unknown" else empty end,
+      if rds_has_explicit_kms_key($plan) then "customer_managed_kms_key" else empty end,
+      if $resource.change.after.publicly_accessible != false then "publicly_accessible" else empty end,
+      if $resource.change.after.storage_encrypted != true then "storage_encrypted" else empty end,
+      if $resource.change.after.engine != "postgres" then "engine" else empty end,
+      if $resource.change.after.engine_version != "16.15" then "engine_version" else empty end,
+      if $resource.change.after.instance_class != "db.t4g.micro" then "instance_class" else empty end,
+      if $resource.change.after.allocated_storage != 20 then "allocated_storage" else empty end,
+      if $resource.change.after.storage_type != "gp3" then "storage_type" else empty end,
+      if $resource.change.after.max_allocated_storage != 0 then "max_allocated_storage" else empty end,
+      if $resource.change.after.multi_az != false then "multi_az" else empty end,
+      if $resource.change.after.deletion_protection != false then "deletion_protection" else empty end,
+      if $resource.change.after.skip_final_snapshot != true then "skip_final_snapshot" else empty end,
+      if $resource.change.after.delete_automated_backups != true then "delete_automated_backups" else empty end,
+      if $resource.change.after.backup_retention_period != 1 then "backup_retention_period" else empty end,
+      if $resource.change.after.manage_master_user_password != true then "manage_master_user_password" else empty end,
+      if $resource.change.after.password != null then "password" else empty end,
+      if ($resource.change.after.db_name != null and $resource.change.after.db_name != "") then "db_name" else empty end,
+      if $resource.change.after.username != "autoshop_owner" then "username" else empty end
+    ];
   . as $plan |
   [
     if (.format_version | type) != "string" or (.resource_changes | type) != "array" then "invalid_plan_shape" else empty end,
@@ -120,7 +156,11 @@ violations="$("$jq_bin" -r '
     if any(resources[]; .type == "aws_vpc_security_group_egress_rule" and changes_after) then "egress_rule_prohibited" else empty end,
     if any(resources[]; .type == "aws_security_group_rule" and changes_after) then "legacy_security_group_rule_prohibited" else empty end,
     if any(resources[]; .type == "aws_security_group" and changes_after and (sg_has_inline_rules($plan; .) or unknown("egress") or ((after.egress // []) | length > 0))) then "inline_security_group_rules_prohibited" else empty end,
+    if any(resources[]; .type == "aws_db_instance" and (((.change.actions // []) | index("delete")) != null)) then "rds_deletion_prohibited" else empty end,
     if any(resources[]; .type == "aws_db_instance" and changes_after and rds_invalid($plan; .)) then "rds_invariant_failed_or_unknown" else empty end,
+    if any(resources[]; .type == "aws_db_instance" and changes_after and rds_invalid($plan; .)) then
+      "rds_invalid_fields:" + ([resources[] | select(.type == "aws_db_instance" and changes_after and rds_invalid($plan; .)) | rds_invalid_fields($plan; .)[]] | unique | join("+"))
+    else empty end,
     if any(resources[]; .type == "aws_vpc_security_group_ingress_rule" and changes_after and (
       unknown("ip_protocol") or
       unknown("from_port") or

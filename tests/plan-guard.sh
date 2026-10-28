@@ -183,6 +183,11 @@ expect_rejected() {
 run_guard "$tmp_dir/valid.json" > "$tmp_dir/valid.out"
 grep -Fq 'PASS' "$tmp_dir/valid.out"
 
+"$jq_bin" '.resource_changes[0].change.after.db_name = ""' \
+  "$tmp_dir/valid.json" > "$tmp_dir/empty_db_name.json"
+run_guard "$tmp_dir/empty_db_name.json" > "$tmp_dir/empty_db_name.out"
+grep -Fq 'PASS' "$tmp_dir/empty_db_name.out" || { printf 'FAIL: provider-normalized empty db_name was rejected\n' >&2; exit 1; }
+
 "$jq_bin" '.resource_changes[0].change.after_unknown.kms_key_id = true' \
   "$tmp_dir/valid.json" > "$tmp_dir/initial_managed_kms.json"
 run_guard "$tmp_dir/initial_managed_kms.json" > "$tmp_dir/initial_managed_kms.out"
@@ -205,12 +210,8 @@ grep -Fq 'PASS' "$tmp_dir/refreshed_managed_kms.out" || { printf 'FAIL: provider
 run_guard "$tmp_dir/refreshed_security_group.json" > "$tmp_dir/refreshed_security_group.out"
 grep -Fq 'PASS' "$tmp_dir/refreshed_security_group.out" || { printf 'FAIL: refreshed standalone ingress rules were rejected as inline rules\n' >&2; exit 1; }
 
-"$jq_bin" '.resource_changes[0].change.actions = ["delete"] | .resource_changes[0].change.after = null' \
-  "$tmp_dir/valid.json" > "$tmp_dir/pure_deletion.json"
-run_guard "$tmp_dir/pure_deletion.json" > "$tmp_dir/pure_deletion.out"
-grep -Fq 'PASS' "$tmp_dir/pure_deletion.out" || { printf 'FAIL: pure deletion was not skipped\n' >&2; exit 1; }
-
 expect_rejected public_db '.resource_changes[0].change.after.publicly_accessible = true'
+grep -Fq 'rds_invalid_fields:publicly_accessible' "$tmp_dir/public_db.out" || { printf 'FAIL: RDS invariant diagnostics did not identify the failing property without values\n' >&2; exit 1; }
 expect_rejected cmk_configured '.resource_changes[0].change.after.kms_key_id = "arn:aws:kms:us-east-1:035611741563:key/customer-managed" | .configuration.root_module.module_calls.instance.module.resources[0].expressions.kms_key_id = {constant_value:"arn:aws:kms:us-east-1:035611741563:key/customer-managed"}'
 expect_rejected public_db_create_then_delete '.resource_changes[0].change.actions = ["create", "delete"] | .resource_changes[0].change.after.publicly_accessible = true'
 expect_rejected public_db_delete_then_create '.resource_changes[0].change.actions = ["delete", "create"] | .resource_changes[0].change.after.publicly_accessible = true'
@@ -233,6 +234,11 @@ expect_rejected dsn_in_ssm '.resource_changes[4].change.after.value = "postgresq
 expect_rejected password_in_ssm '.resource_changes[4].change.after.value = "password=CANARY_SECRET_VALUE"'
 expect_rejected dsn_in_output '.output_changes.db_host.after = "postgresql://app:CANARY_SECRET_VALUE@db.example/autoshop_hml"'
 expect_rejected unknown_rds_public_flag '.resource_changes[0].change.after_unknown.publicly_accessible = true'
+grep -Fq 'rds_invalid_fields:publicly_accessible_unknown' "$tmp_dir/unknown_rds_public_flag.out" || { printf 'FAIL: unknown RDS invariant diagnostics did not identify the property without values\n' >&2; exit 1; }
+expect_rejected rds_deletion '.resource_changes[0].change.actions = ["delete"] | .resource_changes[0].change.after = null'
+grep -Fq 'rds_deletion_prohibited' "$tmp_dir/rds_deletion.out" || { printf 'FAIL: pure RDS deletion did not report the dedicated guard violation\n' >&2; exit 1; }
+expect_rejected rds_db_name_present '.resource_changes[0].change.after.db_name = "unexpected"'
+grep -Fq 'rds_invalid_fields:db_name' "$tmp_dir/rds_db_name_present.out" || { printf 'FAIL: unexpected initial RDS database name was not rejected\n' >&2; exit 1; }
 
-printf 'PASS: valid, refreshed managed-key/security-group, and deletion fixtures accepted; %s invalid fixtures rejected without printing canary values\n' 23
+printf 'PASS: valid, empty db_name, and refreshed managed-key/security-group fixtures accepted; %s invalid fixtures rejected without printing canary values\n' 25
 record_critical_branch plan_guard_replacement_unknown_and_redaction

@@ -19,7 +19,8 @@ capture_ssm_get_parameters_batched() {
     local response_file="$tmp_dir/$output_stem-batch-$batch_index.json"
     local error_file="$tmp_dir/$output_stem-batch-$batch_index.stderr"
 
-    if ! "$aws_bin" --region "$region" ssm get-parameters \
+    # SSM names begin with '/', which Git Bash/MSYS may rewrite as Windows paths.
+    if ! MSYS_NO_PATHCONV=1 "$aws_bin" --region "$region" ssm get-parameters \
       --names "${batch_names[@]}" --output json > "$response_file" 2> "$error_file"; then
       return 1
     fi

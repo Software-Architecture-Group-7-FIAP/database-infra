@@ -31,6 +31,8 @@ def main() -> None:
         "lambda-hml": "local-hml-lambda-only",
         "runtime-prd": "local-prd-runtime-only",
         "lambda-prd": "local-prd-lambda-only",
+        "migrations-hml": "local-hml-migrations-only",
+        "migrations-prd": "local-prd-migrations-only",
     }
     with tempfile.TemporaryDirectory(prefix="materialize-contract-") as directory:
         MATERIALIZE.WORK = Path(directory)
@@ -41,19 +43,30 @@ def main() -> None:
             lines = check_private(sql_file)
             role = f"app_runtime_{environment}"
             lambda_role = f"lambda_auth_{environment}"
+            migration_role = f"autoshop_migrations_{environment}"
             expected = [
                 rf"\set dbname autoshop_{environment}",
                 r"\set owner_role autoshop_owner",
                 rf"\set app_role {role}",
                 rf"\set lambda_role {lambda_role}",
+                rf"\set migration_role {migration_role}",
             ]
-            require(lines[:4] == expected, "bootstrap psql preamble must use one command slash and unquoted validated values")
-            require(lines[4].startswith(r"\set app_password_hash SCRAM-SHA-256$4096:"), "runtime SCRAM verifier is not a psql value")
-            require(lines[5].startswith(r"\set lambda_password_hash SCRAM-SHA-256$4096:"), "Lambda SCRAM verifier is not a psql value")
+            require(lines[:5] == expected, "bootstrap psql preamble must use one command slash and unquoted validated values")
+            require(lines[5].startswith(r"\set app_password_hash SCRAM-SHA-256$4096:"), "runtime SCRAM verifier is not a psql value")
+            require(lines[6].startswith(r"\set lambda_password_hash SCRAM-SHA-256$4096:"), "Lambda SCRAM verifier is not a psql value")
+            require(lines[7].startswith(r"\set migration_password_hash SCRAM-SHA-256$4096:"), "migration SCRAM verifier is not a psql value")
             hash_pattern = re.compile(r"^SCRAM-SHA-256" + re.escape(chr(36)) + r"4096:[A-Za-z0-9+/]{22}==" + re.escape(chr(36)) + r"[A-Za-z0-9+/]{43}=:[A-Za-z0-9+/]{43}=\Z")
-            require(hash_pattern.fullmatch(lines[4].split(maxsplit=2)[2]) is not None, "runtime SCRAM verifier has invalid base64 padding or length")
-            require(hash_pattern.fullmatch(lines[5].split(maxsplit=2)[2]) is not None, "Lambda SCRAM verifier has invalid base64 padding or length")
-            require(all(line.count("'") == 0 for line in lines[:6]), "bootstrap psql preamble must not include quote characters")
+            require(all(hash_pattern.fullmatch(lines[index].split(maxsplit=2)[2]) is not None for index in (5, 6, 7)), "SCRAM verifier has invalid base64 padding or length")
+            require(all(line.count("'") == 0 for line in lines[:8]), "bootstrap psql preamble must not include quote characters")
+
+            defaults_file = MATERIALIZE.WORK / f"migration-defaults-{environment}.sql"
+            defaults_lines = check_private(defaults_file)
+            defaults_expected = [
+                rf"\set dbname autoshop_{environment}",
+                rf"\set app_role app_runtime_{environment}",
+                rf"\set migration_role autoshop_migrations_{environment}",
+            ]
+            require(defaults_lines[:3] == defaults_expected, "migration default privilege psql preamble must match the environment roles")
 
         MATERIALIZE.write_sql_files("grants", dbnames, {})
         for environment in ("hml", "prd"):
@@ -63,8 +76,9 @@ def main() -> None:
                 rf"\set dbname autoshop_{environment}",
                 rf"\set app_role app_runtime_{environment}",
                 rf"\set lambda_role lambda_auth_{environment}",
+                rf"\set migration_role autoshop_migrations_{environment}",
             ]
-            require(lines[:3] == expected, "grants psql preamble must use one command slash and unquoted validated values")
+            require(lines[:4] == expected, "grants psql preamble must use one command slash and unquoted validated values")
 
     print("PASS: materialize emits private PostgreSQL 16 psql inputs with safe single-slash variables")
 

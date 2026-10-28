@@ -5,6 +5,8 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "$tmp_dir"' EXIT
 
+bash "$repo_root/tests/private-tmp.sh"
+
 fail() {
   printf 'FAIL: %s\n' "$1" >&2
   exit 1
@@ -147,7 +149,17 @@ cat > "$tmp_dir/bin/orphan-aws" <<'SH'
 arguments="$*"
 case "$arguments" in
   *"get-secret-value"*|*"get-parameters-by-path"*|*"GetSecretValue"*|*"GetParametersByPath"*) printf 'prohibited API request\n' >&2; exit 98 ;;
-  *"resourcegroupstaggingapi get-resources"*) printf '{"ResourceTagMappingList":[]}\n' ;;
+  *"resourcegroupstaggingapi get-resources"*)
+    case "${ORPHAN_TEST_TAG_MODE:-empty}" in
+      empty) printf '{"ResourceTagMappingList":[]}\n' ;;
+      present) printf '{"ResourceTagMappingList":[{"ResourceARN":"arn:aws:rds:us-east-1:035611741563:db:orphan"}]}\n' ;;
+      query-error)
+        printf 'AccessDeniedException: resource metadata query denied\n' >&2
+        exit 255
+        ;;
+      *) printf 'unexpected orphan tag mode\n' >&2; exit 97 ;;
+    esac
+    ;;
   *"rds describe-db-instances"*) printf 'DBInstanceNotFound: no such staging instance\n' >&2; exit 255 ;;
   *"rds describe-db-snapshots"*) printf '{"DBSnapshots":[]}\n' ;;
   *"rds describe-db-instance-automated-backups"*) printf '{"DBInstanceAutomatedBackups":[]}\n' ;;
@@ -194,7 +206,15 @@ case "$arguments" in
         ;;
     esac
     ;;
-  *"iam get-role"*|*"iam get-policy"*) printf 'NoSuchEntity: no such IAM resource\n' >&2; exit 255 ;;
+  *"iam get-role"*) printf 'NoSuchEntity: no such IAM role\n' >&2; exit 255 ;;
+  *"iam get-policy"*)
+    if [[ "${ORPHAN_TEST_LEGACY_POLICY_MODE:-absent}" == present && "$arguments" == *"auto-shop-staging-db-read-owner"* ]]; then
+      printf '{"Policy":{"PolicyName":"auto-shop-staging-db-read-owner"}}\n'
+    else
+      printf 'NoSuchEntity: no such IAM policy\n' >&2
+      exit 255
+    fi
+    ;;
   *"ssm get-parameter --name"*) printf '{"Parameter":{"Value":"auto-shop-staging"}}\n' ;;
   *"eks describe-cluster"*) printf '{"cluster":{"name":"auto-shop-staging"}}\n' ;;
   *"eks list-pod-identity-associations"*) printf '{"associations":[]}\n' ;;
@@ -214,7 +234,11 @@ case "$arguments" in
     done
     [[ "$requested_name_count" -le 10 ]] || { printf 'ValidationException: GetParameters accepts at most 10 names\n' >&2; exit 254; }
     printf '%s\n' "$requested_name_count" >> "$ORCHESTRATION_TEST_SSM_BATCH_LOG"
-    printf '{"Parameters":[],"InvalidParameters":[]}\n'
+    if [[ "${ORPHAN_TEST_LEGACY_SSM_MODE:-absent}" == present && "$arguments" == *"/database/iam/owner-read-policy-arn"* ]]; then
+      printf '{"Parameters":[{"Name":"/auto-shop/staging/database/iam/owner-read-policy-arn"}],"InvalidParameters":[]}\n'
+    else
+      printf '{"Parameters":[],"InvalidParameters":[]}\n'
+    fi
     ;;
   *) printf 'unexpected AWS metadata command\n' >&2; exit 97 ;;
 esac
@@ -222,14 +246,86 @@ SH
 chmod +x "$tmp_dir/bin/orphan-aws"
 assert_secret_value_apis_denied "$tmp_dir/bin/orphan-aws"
 printf '{}\n' > "$tmp_dir/manifest.json"
+
+if bash "$repo_root/scripts/orphans.sh" "$tmp_dir/missing-manifest.json" > "$tmp_dir/orphans-missing-manifest.out" 2>&1; then
+  fail 'orphan scan accepted a missing Terraform manifest'
+else
+  grep -Fq 'FAIL: Terraform metadata manifest is not readable' "$tmp_dir/orphans-missing-manifest.out" || fail 'orphan scan did not reject a missing manifest'
+fi
+
+printf '{"connection_string":"postgresql://synthetic-fixture"}\n' > "$tmp_dir/unsafe-manifest.json"
+if bash "$repo_root/scripts/orphans.sh" "$tmp_dir/unsafe-manifest.json" > "$tmp_dir/orphans-unsafe-manifest.out" 2>&1; then
+  fail 'orphan scan accepted a manifest containing a connection string'
+else
+  grep -Fq 'FAIL: Terraform metadata manifest is invalid or contains a prohibited connection value' "$tmp_dir/orphans-unsafe-manifest.out" || fail 'orphan scan did not reject connection values in a manifest'
+fi
+
+if AWS_BIN=missing-orphan-aws bash "$repo_root/scripts/orphans.sh" "$tmp_dir/manifest.json" > "$tmp_dir/orphans-missing-aws.out" 2>&1; then
+  fail 'orphan scan accepted a missing AWS CLI'
+else
+  grep -Fq 'FAIL: aws CLI is required' "$tmp_dir/orphans-missing-aws.out" || fail 'orphan scan did not report a missing AWS CLI'
+fi
+
+if JQ_BIN=missing-orphan-jq AWS_BIN="$tmp_dir/bin/orphan-aws" \
+  bash "$repo_root/scripts/orphans.sh" "$tmp_dir/manifest.json" > "$tmp_dir/orphans-missing-jq.out" 2>&1; then
+  fail 'orphan scan accepted a missing jq executable'
+else
+  grep -Fq 'FAIL: jq is required' "$tmp_dir/orphans-missing-jq.out" || fail 'orphan scan did not report a missing jq executable'
+fi
+
 : > "$tmp_dir/orphans-batches.log"
 ORCHESTRATION_TEST_SSM_BATCH_LOG="$tmp_dir/orphans-batches.log" AWS_BIN="$tmp_dir/bin/orphan-aws" \
   bash "$repo_root/scripts/orphans.sh" "$tmp_dir/manifest.json" > "$tmp_dir/orphans.out"
 grep -Fq 'PASS: database-infra orphan scan completed' "$tmp_dir/orphans.out" || fail 'orphan scan did not complete against empty fixtures'
-printf '10\n3\n' > "$tmp_dir/expected-ssm-batches.log"
-cmp -s "$tmp_dir/expected-ssm-batches.log" "$tmp_dir/orphans-batches.log" || fail 'orphan scan did not query all published parameters in 10-name batches'
+printf '10\n6\n' > "$tmp_dir/expected-ssm-batches.log"
+printf '10\n7\n' > "$tmp_dir/expected-orphan-ssm-batches.log"
+cmp -s "$tmp_dir/expected-orphan-ssm-batches.log" "$tmp_dir/orphans-batches.log" || fail 'orphan scan did not query all published parameters in 10-name batches'
 if grep -Fq 'CANARY_SECRET_VALUE' "$tmp_dir/orphans.out"; then
   fail 'orphan scan leaked a canary value'
+fi
+
+if ORPHAN_TEST_LEGACY_POLICY_MODE=present \
+  ORCHESTRATION_TEST_SSM_BATCH_LOG="$tmp_dir/orphans-legacy-policy-batches.log" \
+  AWS_BIN="$tmp_dir/bin/orphan-aws" \
+  bash "$repo_root/scripts/orphans.sh" "$tmp_dir/manifest.json" > "$tmp_dir/orphans-legacy-policy.out" 2>&1; then
+  fail 'orphan scan accepted the legacy owner-read IAM policy'
+else
+  status=$?
+  [[ "$status" -eq 1 ]] || fail "legacy owner-read IAM policy detection returned $status instead of a closed failure"
+  grep -Fq 'FAIL: orphan detected: managed IAM policy auto-shop-staging-db-read-owner' \
+    "$tmp_dir/orphans-legacy-policy.out" || fail 'orphan scan did not reject the legacy owner-read IAM policy'
+fi
+
+if ORPHAN_TEST_LEGACY_SSM_MODE=present \
+  ORCHESTRATION_TEST_SSM_BATCH_LOG="$tmp_dir/orphans-legacy-ssm-batches.log" \
+  AWS_BIN="$tmp_dir/bin/orphan-aws" \
+  bash "$repo_root/scripts/orphans.sh" "$tmp_dir/manifest.json" > "$tmp_dir/orphans-legacy-ssm.out" 2>&1; then
+  fail 'orphan scan accepted the legacy owner-read SSM parameter'
+else
+  status=$?
+  [[ "$status" -eq 1 ]] || fail "legacy owner-read SSM detection returned $status instead of a closed failure"
+  grep -Fq 'FAIL: orphan detected or ownership query incomplete: published database SSM parameters' \
+    "$tmp_dir/orphans-legacy-ssm.out" || fail 'orphan scan did not reject the legacy owner-read SSM parameter'
+fi
+
+if ORPHAN_TEST_TAG_MODE=present AWS_BIN="$tmp_dir/bin/orphan-aws" \
+  bash "$repo_root/scripts/orphans.sh" "$tmp_dir/manifest.json" > "$tmp_dir/orphans-tagged-resource.out" 2>&1; then
+  fail 'orphan scan accepted a tagged resource still present in AWS'
+else
+  status=$?
+  [[ "$status" -eq 1 ]] || fail "tagged resource detection returned $status instead of a closed failure"
+  grep -Fq 'FAIL: orphan detected or ownership query incomplete: all tagged database-infra resources' \
+    "$tmp_dir/orphans-tagged-resource.out" || fail 'orphan scan did not reject a tagged resource'
+fi
+
+if ORPHAN_TEST_TAG_MODE=query-error AWS_BIN="$tmp_dir/bin/orphan-aws" \
+  bash "$repo_root/scripts/orphans.sh" "$tmp_dir/manifest.json" > "$tmp_dir/orphans-tag-query-error.out" 2>&1; then
+  fail 'orphan scan accepted a failed AWS ownership query'
+else
+  status=$?
+  [[ "$status" -eq 1 ]] || fail "ownership query failure returned $status instead of a closed failure"
+  grep -Fq 'FAIL: tagged_resources metadata query failed' "$tmp_dir/orphans-tag-query-error.out" ||
+    fail 'orphan scan did not report an AWS ownership query failure'
 fi
 
 run_orphan_secret_case() {
@@ -259,7 +355,7 @@ run_orphan_secret_case() {
   fi
 
   if [[ "$expected" == pass ]]; then
-    cmp -s "$tmp_dir/expected-ssm-batches.log" "$tmp_dir/orphans-$mode-batches.log" || fail "orphan polling did not batch all published parameters for $mode"
+    cmp -s "$tmp_dir/expected-orphan-ssm-batches.log" "$tmp_dir/orphans-$mode-batches.log" || fail "orphan polling did not batch all published parameters for $mode"
   fi
 
   case "$mode" in
@@ -310,10 +406,13 @@ cat > "$tmp_dir/smoke-fixtures/parameters.json" <<'JSON'
     {"Name":"/auto-shop/staging/database/secrets/runtime-prd-arn","Type":"String","Value":"arn:aws:secretsmanager:us-east-1:035611741563:secret:auto-shop/staging/prd/app-runtime"},
     {"Name":"/auto-shop/staging/database/secrets/lambda-hml-arn","Type":"String","Value":"arn:aws:secretsmanager:us-east-1:035611741563:secret:auto-shop/staging/hml/lambda-auth"},
     {"Name":"/auto-shop/staging/database/secrets/lambda-prd-arn","Type":"String","Value":"arn:aws:secretsmanager:us-east-1:035611741563:secret:auto-shop/staging/prd/lambda-auth"},
+    {"Name":"/auto-shop/staging/database/secrets/migrations-hml-arn","Type":"String","Value":"arn:aws:secretsmanager:us-east-1:035611741563:secret:auto-shop/staging/hml/migrations"},
+    {"Name":"/auto-shop/staging/database/secrets/migrations-prd-arn","Type":"String","Value":"arn:aws:secretsmanager:us-east-1:035611741563:secret:auto-shop/staging/prd/migrations"},
     {"Name":"/auto-shop/staging/database/secrets/owner-arn","Type":"String","Value":"arn:aws:secretsmanager:us-east-1:035611741563:secret:rds!db-example"},
-    {"Name":"/auto-shop/staging/database/iam/owner-read-policy-arn","Type":"String","Value":"arn:aws:iam::035611741563:policy/auto-shop/auto-shop-staging-db-read-owner"},
     {"Name":"/auto-shop/staging/database/iam/lambda-read-policy-arn/hml","Type":"String","Value":"arn:aws:iam::035611741563:policy/auto-shop/auto-shop-staging-db-read-lambda-hml"},
-    {"Name":"/auto-shop/staging/database/iam/lambda-read-policy-arn/prd","Type":"String","Value":"arn:aws:iam::035611741563:policy/auto-shop/auto-shop-staging-db-read-lambda-prd"}
+    {"Name":"/auto-shop/staging/database/iam/lambda-read-policy-arn/prd","Type":"String","Value":"arn:aws:iam::035611741563:policy/auto-shop/auto-shop-staging-db-read-lambda-prd"},
+    {"Name":"/auto-shop/staging/database/iam/migrations-hml-read-policy-arn","Type":"String","Value":"arn:aws:iam::035611741563:policy/auto-shop/auto-shop-staging-db-read-migrations-hml"},
+    {"Name":"/auto-shop/staging/database/iam/migrations-prd-read-policy-arn","Type":"String","Value":"arn:aws:iam::035611741563:policy/auto-shop/auto-shop-staging-db-read-migrations-prd"}
   ]
 }
 JSON

@@ -254,5 +254,5 @@ jobs:
             echo "::error::Terraform could not produce the guarded plan JSON."
             exit 1
           fi
-          ./scripts/plan-summary.sh "$temp_dir/plan.json" >> "$GITHUB_STEP_SUMMARY"
+          ./scripts/plan-summary.sh "$temp_dir/plan.json" | tee -a "$GITHUB_STEP_SUMMARY"
           ./scripts/plan-guard.sh "$temp_dir/plan.json" >> "$GITHUB_STEP_SUMMARY"

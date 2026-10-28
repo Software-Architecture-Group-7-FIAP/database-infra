@@ -10,3 +10,4 @@ All notable changes to this repository are recorded here.
 - Add CI, deployment guards, operational scripts, and security decisions for the staging database lifecycle.
 - Implement the Pod Identity database Job with aws-cli and postgres:16 init containers, asm-exec secret resolution, SCRAM verifiers, PutSecretValue publication, and sensitive runtime files confined to memory-backed emptyDir.
 - Add the post-migration full smoke for TLS hostname verification, role authentication, least privilege, and logical database isolation.
+- Add separate HML/PRD migration credential metadata, database-scoped PostgreSQL roles, and exact-ARN read policies; keep the RDS master secret exclusive to bootstrap.

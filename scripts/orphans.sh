@@ -150,7 +150,9 @@ for secret_name in \
   auto-shop/staging/hml/app-runtime \
   auto-shop/staging/prd/app-runtime \
   auto-shop/staging/hml/lambda-auth \
-  auto-shop/staging/prd/lambda-auth; do
+  auto-shop/staging/prd/lambda-auth \
+  auto-shop/staging/hml/migrations \
+  auto-shop/staging/prd/migrations; do
   safe_name="$(printf '%s' "$secret_name" | tr '/-' '__')"
   assert_secret_absent_or_pending "Secrets Manager metadata $secret_name" "$secret_name" "secret-$safe_name"
 done
@@ -163,6 +165,8 @@ fi
 assert_named_resource_absent 'bootstrap IAM role' bootstrap_role iam get-role --role-name auto-shop-staging-db-bootstrap
 for policy_name in \
   auto-shop-staging-db-read-owner \
+  auto-shop-staging-db-read-migrations-hml \
+  auto-shop-staging-db-read-migrations-prd \
   auto-shop-staging-db-read-lambda-hml \
   auto-shop-staging-db-read-lambda-prd; do
   policy_arn="arn:aws:iam::035611741563:policy/auto-shop/$policy_name"
@@ -193,10 +197,14 @@ output_parameter_names=(
   /auto-shop/staging/database/secrets/runtime-prd-arn
   /auto-shop/staging/database/secrets/lambda-hml-arn
   /auto-shop/staging/database/secrets/lambda-prd-arn
+  /auto-shop/staging/database/secrets/migrations-hml-arn
+  /auto-shop/staging/database/secrets/migrations-prd-arn
   /auto-shop/staging/database/secrets/owner-arn
   /auto-shop/staging/database/iam/owner-read-policy-arn
   /auto-shop/staging/database/iam/lambda-read-policy-arn/hml
   /auto-shop/staging/database/iam/lambda-read-policy-arn/prd
+  /auto-shop/staging/database/iam/migrations-hml-read-policy-arn
+  /auto-shop/staging/database/iam/migrations-prd-read-policy-arn
 )
 if ! capture_ssm_get_parameters_batched \
   "$tmp_dir/output_parameters.json" "$aws_bin" "$region" "$jq_bin" "$tmp_dir" \

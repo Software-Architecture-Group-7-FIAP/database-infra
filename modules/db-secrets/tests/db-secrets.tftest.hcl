@@ -6,7 +6,7 @@ variables {
   tags         = { Project = "auto-shop", Environment = "staging" }
 }
 
-run "creates_only_runtime_and_lambda_secret_metadata" {
+run "creates_runtime_lambda_and_migration_secret_metadata" {
   command = plan
 
   assert {
@@ -17,6 +17,11 @@ run "creates_only_runtime_and_lambda_secret_metadata" {
   assert {
     condition     = length(aws_secretsmanager_secret.lambda) == 2
     error_message = "The module must create one lambda-auth secret for each logical database."
+  }
+
+  assert {
+    condition     = length(aws_secretsmanager_secret.migrations) == 2
+    error_message = "The module must create one database-scoped migration secret for each logical database."
   }
 
   assert {
@@ -32,7 +37,8 @@ run "creates_only_runtime_and_lambda_secret_metadata" {
   assert {
     condition = alltrue(concat(
       [for secret in values(aws_secretsmanager_secret.runtime) : secret.recovery_window_in_days == 0 && secret.kms_key_id == null],
-      [for secret in values(aws_secretsmanager_secret.lambda) : secret.recovery_window_in_days == 0 && secret.kms_key_id == null]
+      [for secret in values(aws_secretsmanager_secret.lambda) : secret.recovery_window_in_days == 0 && secret.kms_key_id == null],
+      [for secret in values(aws_secretsmanager_secret.migrations) : secret.recovery_window_in_days == 0 && secret.kms_key_id == null]
     ))
     error_message = "Ephemeral secrets must use immediate deletion and the AWS managed Secrets Manager key."
   }

@@ -15,7 +15,9 @@ fail() {
 
 export BOOTSTRAP_SSM_FIXTURE="$tmp_dir/parameters.json"
 export BOOTSTRAP_AWS_CALLS="$tmp_dir/aws-calls.log"
+export BOOTSTRAP_AWS_BATCH_COUNT="$tmp_dir/aws-batch-count"
 export BOOTSTRAP_KUBECTL_CALLS="$tmp_dir/kubectl-calls.log"
+: > "$BOOTSTRAP_AWS_BATCH_COUNT"
 
 cat > "$bin_dir/aws" <<'FAKE_AWS'
 #!/usr/bin/env bash
@@ -33,7 +35,13 @@ case "$*" in
     if [[ "${BOOTSTRAP_AWS_MODE:-success}" == fail-ssm ]]; then
       exit 1
     fi
-    cat "$BOOTSTRAP_SSM_FIXTURE"
+    batch_index="$(<"$BOOTSTRAP_AWS_BATCH_COUNT")"
+    printf '%s\n' "$((batch_index + 1))" > "$BOOTSTRAP_AWS_BATCH_COUNT"
+    if [[ "$batch_index" -eq 0 ]]; then
+      jq '.Parameters |= .[0:10]' "$BOOTSTRAP_SSM_FIXTURE"
+    else
+      jq '.Parameters |= .[10:20]' "$BOOTSTRAP_SSM_FIXTURE"
+    fi
     ;;
   'eks update-kubeconfig '*)
     [[ "${BOOTSTRAP_AWS_FAIL_KUBECONFIG:-false}" != true ]]
@@ -73,7 +81,15 @@ case "$*" in
     printf 'apiVersion: v1\nkind: ConfigMap\n'
     ;;
   *'apply -f '*)
-    [[ "${BOOTSTRAP_KUBECTL_MODE:-success}" != fail-apply ]] || exit 1
+    if [[ "${BOOTSTRAP_KUBECTL_MODE:-success}" == fail-apply && "$*" == *'/service-account.yaml'* ]]; then
+      exit 1
+    fi
+    if [[ "${BOOTSTRAP_KUBECTL_MODE:-success}" == fail-sql-configmap-apply && "$*" == *'/sql-configmap.yaml'* ]]; then
+      exit 1
+    fi
+    if [[ "${BOOTSTRAP_KUBECTL_MODE:-success}" == fail-settings-configmap-apply && "$*" == *'/settings-configmap.yaml'* ]]; then
+      exit 1
+    fi
     if [[ "${BOOTSTRAP_KUBECTL_MODE:-success}" == fail-job-apply && "$*" == *'/bootstrap/job.yaml'* ]]; then
       exit 1
     fi
@@ -97,6 +113,8 @@ cat > "$BOOTSTRAP_SSM_FIXTURE" <<'PARAMETERS'
     {"Name":"/auto-shop/staging/database/secrets/runtime-prd-arn","Type":"String","Value":"arn:aws:secretsmanager:us-east-1:035611741563:secret:auto-shop/staging/prd/app-runtime-def456"},
     {"Name":"/auto-shop/staging/database/secrets/lambda-hml-arn","Type":"String","Value":"arn:aws:secretsmanager:us-east-1:035611741563:secret:auto-shop/staging/hml/lambda-auth-ghi789"},
     {"Name":"/auto-shop/staging/database/secrets/lambda-prd-arn","Type":"String","Value":"arn:aws:secretsmanager:us-east-1:035611741563:secret:auto-shop/staging/prd/lambda-auth-jkl012"},
+    {"Name":"/auto-shop/staging/database/secrets/migrations-hml-arn","Type":"String","Value":"arn:aws:secretsmanager:us-east-1:035611741563:secret:auto-shop/staging/hml/migrations-mno345"},
+    {"Name":"/auto-shop/staging/database/secrets/migrations-prd-arn","Type":"String","Value":"arn:aws:secretsmanager:us-east-1:035611741563:secret:auto-shop/staging/prd/migrations-pqr678"},
     {"Name":"/auto-shop/staging/database/secrets/owner-arn","Type":"String","Value":"arn:aws:secretsmanager:us-east-1:035611741563:secret:rds!db-autoshop-abc123"},
     {"Name":"/auto-shop/staging/eks/cluster-name","Type":"String","Value":"auto-shop-staging"}
   ],
@@ -104,6 +122,7 @@ cat > "$BOOTSTRAP_SSM_FIXTURE" <<'PARAMETERS'
 }
 PARAMETERS
 
+: > "$BOOTSTRAP_AWS_BATCH_COUNT"
 PATH="$bin_dir:$PATH" bash "$repo_root/scripts/bootstrap-db.sh" bootstrap > "$tmp_dir/bootstrap.out"
 grep -Fq 'PASS: database Job phase bootstrap completed' "$tmp_dir/bootstrap.out" \
   || { printf 'FAIL: bootstrap runtime did not complete against local fixtures\n' >&2; exit 1; }
@@ -128,6 +147,7 @@ expect_bootstrap_failure() {
   local aws_mode="${7:-success}"
   local output="$tmp_dir/$label.out"
 
+  : > "$BOOTSTRAP_AWS_BATCH_COUNT"
   if PATH="$bin_dir:$PATH" \
     BOOTSTRAP_SSM_FIXTURE="$fixture" \
     BOOTSTRAP_AWS_ACCOUNT="$account" \
@@ -137,7 +157,22 @@ expect_bootstrap_failure() {
     bash "$repo_root/scripts/bootstrap-db.sh" bootstrap > "$output" 2>&1; then
     fail "bootstrap unexpectedly accepted $label"
   fi
-  grep -Fq "FAIL: $expected" "$output" || fail "bootstrap did not report the expected $label error"
+  if ! grep -Fq "FAIL: $expected" "$output"; then
+    local observed_failure
+    observed_failure="$(sed -nE 's/^(FAIL: [[:alnum:]_ /-]+).*/\1/p' "$output" | head -n 1 || true)"
+    if [[ -z "$observed_failure" ]]; then
+      if grep -Fq 'jq: error:' "$output"; then
+        observed_failure='jq command error'
+      elif grep -Fq 'command not found' "$output"; then
+        observed_failure='command not found'
+      elif [[ -s "$output" ]]; then
+        observed_failure='unrecognized output (details suppressed)'
+      else
+        observed_failure='empty output'
+      fi
+    fi
+    fail "bootstrap $label returned ${observed_failure:-no sanitized failure}, not the expected error"
+  fi
 }
 
 expect_invalid_parameter() {
@@ -194,8 +229,12 @@ expect_bootstrap_failure sql_configmap_failure 'bootstrap source ConfigMap could
   "$BOOTSTRAP_SSM_FIXTURE" 035611741563 false fail-sql-configmap
 expect_bootstrap_failure settings_configmap_failure 'bootstrap settings ConfigMap could not be rendered' \
   "$BOOTSTRAP_SSM_FIXTURE" 035611741563 false fail-settings-configmap
-expect_bootstrap_failure resource_apply_failure 'bootstrap ServiceAccount or ConfigMap could not be applied' \
+expect_bootstrap_failure serviceaccount_apply_failure 'bootstrap ServiceAccount apply failed' \
   "$BOOTSTRAP_SSM_FIXTURE" 035611741563 false fail-apply
+expect_bootstrap_failure sql_configmap_apply_failure 'bootstrap source ConfigMap apply failed' \
+  "$BOOTSTRAP_SSM_FIXTURE" 035611741563 false fail-sql-configmap-apply
+expect_bootstrap_failure settings_configmap_apply_failure 'bootstrap settings ConfigMap apply failed' \
+  "$BOOTSTRAP_SSM_FIXTURE" 035611741563 false fail-settings-configmap-apply
 expect_bootstrap_failure job_apply_failure 'bootstrap Job could not be applied' \
   "$BOOTSTRAP_SSM_FIXTURE" 035611741563 false fail-job-apply
 expect_bootstrap_failure job_status_failure 'bootstrap Job status could not be read' \

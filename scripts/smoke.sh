@@ -75,10 +75,13 @@ required_output_parameters=(
   /auto-shop/staging/database/secrets/runtime-prd-arn
   /auto-shop/staging/database/secrets/lambda-hml-arn
   /auto-shop/staging/database/secrets/lambda-prd-arn
+  /auto-shop/staging/database/secrets/migrations-hml-arn
+  /auto-shop/staging/database/secrets/migrations-prd-arn
   /auto-shop/staging/database/secrets/owner-arn
-  /auto-shop/staging/database/iam/owner-read-policy-arn
   /auto-shop/staging/database/iam/lambda-read-policy-arn/hml
   /auto-shop/staging/database/iam/lambda-read-policy-arn/prd
+  /auto-shop/staging/database/iam/migrations-hml-read-policy-arn
+  /auto-shop/staging/database/iam/migrations-prd-read-policy-arn
 )
 
 if ! capture_ssm_get_parameters_batched \
@@ -87,7 +90,7 @@ if ! capture_ssm_get_parameters_batched \
   fail 'SSM parameter metadata query failed'
 fi
 assert_json 'SSM contract contains exactly the approved plain String parameters' \
-  '(.InvalidParameters | length == 0) and (.Parameters | length == 13) and all(.Parameters[]; .Type == "String" and (.Name | startswith("/auto-shop/staging/database/"))) and all(.Parameters[]; (.Value | test("postgres(ql)?://|password[[:space:]_]*[:=]|database_url|connection_string|dsn[[:space:]_]*[:=]"; "i") | not))' \
+  '(.InvalidParameters | length == 0) and (.Parameters | length == 16) and all(.Parameters[]; .Type == "String" and (.Name | startswith("/auto-shop/staging/database/"))) and all(.Parameters[]; (.Value | test("postgres(ql)?://|password[[:space:]_]*[:=]|database_url|connection_string|dsn[[:space:]_]*[:=]"; "i") | not))' \
   parameters
 
 capture_aws_json instance rds describe-db-instances --db-instance-identifier auto-shop-staging
@@ -139,6 +142,8 @@ app_secret_names=(
   auto-shop/staging/prd/app-runtime
   auto-shop/staging/hml/lambda-auth
   auto-shop/staging/prd/lambda-auth
+  auto-shop/staging/hml/migrations
+  auto-shop/staging/prd/migrations
 )
 secret_index=0
 for secret_name in "${app_secret_names[@]}"; do

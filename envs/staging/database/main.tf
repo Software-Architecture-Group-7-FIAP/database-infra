@@ -132,13 +132,13 @@ data "aws_iam_policy_document" "db_bootstrap" {
   statement {
     sid       = "ReadPublishedApplicationCredentialsForRetry"
     actions   = ["secretsmanager:GetSecretValue"]
-    resources = concat(values(module.secrets.runtime_secret_arns), values(module.secrets.lambda_secret_arns))
+    resources = concat(values(module.secrets.runtime_secret_arns), values(module.secrets.lambda_secret_arns), values(module.secrets.migration_secret_arns))
   }
 
   statement {
     sid       = "PublishApplicationCredentials"
     actions   = ["secretsmanager:PutSecretValue", "secretsmanager:DescribeSecret"]
-    resources = concat(values(module.secrets.runtime_secret_arns), values(module.secrets.lambda_secret_arns))
+    resources = concat(values(module.secrets.runtime_secret_arns), values(module.secrets.lambda_secret_arns), values(module.secrets.migration_secret_arns))
   }
 }
 
@@ -155,18 +155,33 @@ resource "aws_eks_pod_identity_association" "db_bootstrap" {
   role_arn        = aws_iam_role.db_bootstrap.arn
 }
 
-data "aws_iam_policy_document" "owner_secret_read" {
+data "aws_iam_policy_document" "migration_hml_secret_read" {
   statement {
     actions   = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"]
-    resources = [module.instance.master_user_secret_arn]
+    resources = [module.secrets.migration_secret_arns["hml"]]
   }
 }
 
-resource "aws_iam_policy" "owner_secret_read" {
-  name        = "auto-shop-staging-db-read-owner"
+resource "aws_iam_policy" "migration_hml_secret_read" {
+  name        = "auto-shop-staging-db-read-migrations-hml"
   path        = "/auto-shop/"
-  description = "Read only the staging RDS-managed master secret for the approved migrations identity."
-  policy      = data.aws_iam_policy_document.owner_secret_read.json
+  description = "Read only the staging hml database migration credential secret."
+  policy      = data.aws_iam_policy_document.migration_hml_secret_read.json
+  tags        = local.tags
+}
+
+data "aws_iam_policy_document" "migration_prd_secret_read" {
+  statement {
+    actions   = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"]
+    resources = [module.secrets.migration_secret_arns["prd"]]
+  }
+}
+
+resource "aws_iam_policy" "migration_prd_secret_read" {
+  name        = "auto-shop-staging-db-read-migrations-prd"
+  path        = "/auto-shop/"
+  description = "Read only the staging prd database migration credential secret."
+  policy      = data.aws_iam_policy_document.migration_prd_secret_read.json
   tags        = local.tags
 }
 
@@ -205,19 +220,22 @@ module "ssm_contract" {
 
   prefix = "/auto-shop/staging"
   strings = {
-    "database/host"                           = module.instance.address
-    "database/port"                           = tostring(module.instance.port)
-    "database/security-group-id"              = module.network.security_group_id
-    "database/names/hml"                      = local.db_names["hml"]
-    "database/names/prd"                      = local.db_names["prd"]
-    "database/secrets/runtime-hml-arn"        = module.secrets.runtime_secret_arns["hml"]
-    "database/secrets/runtime-prd-arn"        = module.secrets.runtime_secret_arns["prd"]
-    "database/secrets/lambda-hml-arn"         = module.secrets.lambda_secret_arns["hml"]
-    "database/secrets/lambda-prd-arn"         = module.secrets.lambda_secret_arns["prd"]
-    "database/secrets/owner-arn"              = module.instance.master_user_secret_arn
-    "database/iam/owner-read-policy-arn"      = aws_iam_policy.owner_secret_read.arn
-    "database/iam/lambda-read-policy-arn/hml" = aws_iam_policy.lambda_hml_secret_read.arn
-    "database/iam/lambda-read-policy-arn/prd" = aws_iam_policy.lambda_prd_secret_read.arn
+    "database/host"                               = module.instance.address
+    "database/port"                               = tostring(module.instance.port)
+    "database/security-group-id"                  = module.network.security_group_id
+    "database/names/hml"                          = local.db_names["hml"]
+    "database/names/prd"                          = local.db_names["prd"]
+    "database/secrets/runtime-hml-arn"            = module.secrets.runtime_secret_arns["hml"]
+    "database/secrets/runtime-prd-arn"            = module.secrets.runtime_secret_arns["prd"]
+    "database/secrets/lambda-hml-arn"             = module.secrets.lambda_secret_arns["hml"]
+    "database/secrets/lambda-prd-arn"             = module.secrets.lambda_secret_arns["prd"]
+    "database/secrets/migrations-hml-arn"         = module.secrets.migration_secret_arns["hml"]
+    "database/secrets/migrations-prd-arn"         = module.secrets.migration_secret_arns["prd"]
+    "database/secrets/owner-arn"                  = module.instance.master_user_secret_arn
+    "database/iam/migrations-hml-read-policy-arn" = aws_iam_policy.migration_hml_secret_read.arn
+    "database/iam/migrations-prd-read-policy-arn" = aws_iam_policy.migration_prd_secret_read.arn
+    "database/iam/lambda-read-policy-arn/hml"     = aws_iam_policy.lambda_hml_secret_read.arn
+    "database/iam/lambda-read-policy-arn/prd"     = aws_iam_policy.lambda_prd_secret_read.arn
   }
   tags = local.tags
 }

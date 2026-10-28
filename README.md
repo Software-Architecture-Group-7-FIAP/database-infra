@@ -15,7 +15,7 @@ Provisiona uma única instância PostgreSQL efêmera para o staging do Auto Shop
 
 - Terraform `>= 1.10.0, < 2.0.0`, provider AWS `~> 6.70` e lock file versionado.
 - PostgreSQL 16.15 em `db.t4g.micro`, Single-AZ, gp3 de 20 GiB, dentro das subnets isoladas do staging.
-- GitHub Actions com OIDC; este repositório referencia roles de CI externas e não gerencia suas trust policies, o bucket de state ou a permissions boundary. As trust policies precisam restringir audience, repositório e refs autorizadas na conta AWS.
+- GitHub Actions com OIDC; este repositório não cria nem altera roles de CI, bucket de state ou permissions boundary. As trust policies dessas roles externas devem restringir audience, repositório e refs autorizadas na conta AWS.
 - PostgreSQL client e Docker para os testes locais de permissões SQL.
 
 ## Arquitetura
@@ -26,8 +26,8 @@ flowchart LR
   Root --> RDS[(RDS PostgreSQL 16.15)]
   RDS --> HML[(autoshop_hml)]
   RDS --> PRD[(autoshop_prd)]
-  Root --> Secrets[Metadados de 4 secrets de aplicação]
-  Root --> IAM[Role Pod Identity e 3 policies de leitura]
+  Root --> Secrets[Metadados de 6 secrets de aplicação]
+  Root --> IAM[Role Pod Identity de bootstrap e 4 policies de leitura restrita]
   Root --> SSM[Contrato database no SSM]
   Bootstrap[Job de bootstrap autorizado] --> RDS
   Bootstrap --> Secrets
@@ -44,7 +44,7 @@ modules/db-network/          # Subnets isoladas e regras SG referenciadas por SG
 modules/db-instance/         # RDS PostgreSQL efêmero e parameter group
 modules/db-secrets/          # Apenas metadados de Secrets Manager
 modules/ssm-contract/        # String/StringList sem valores secretos
-sql/                         # Bootstrap de roles e grants Lambda pós-migration
+sql/                         # Bootstrap de roles, defaults de migration e grants pós-migration
 scripts/                     # Guard, resumo, smoke, bootstrap e orphan scan
 tests/                       # Terraform mocks, testes SQL e contratos de scripts
 .github/workflows/           # CI, apply e destroy
@@ -65,12 +65,15 @@ Todos os parâmetros publicados são `String`, tier Standard, na região `us-eas
 | `/auto-shop/staging/database/secrets/runtime-prd-arn` | ARN `app-runtime` prd | ExternalSecret do `auto-shop-system` |
 | `/auto-shop/staging/database/secrets/lambda-hml-arn` | ARN `lambda-auth` hml | função `lambda-auth` hml |
 | `/auto-shop/staging/database/secrets/lambda-prd-arn` | ARN `lambda-auth` prd | função `lambda-auth` prd |
-| `/auto-shop/staging/database/secrets/owner-arn` | ARN do master secret gerenciado pelo RDS | identidade de migrations do `auto-shop-system` |
-| `/auto-shop/staging/database/iam/owner-read-policy-arn` | ARN de `auto-shop-staging-db-read-owner` | role de migrations, após revisão do consumidor |
+| `/auto-shop/staging/database/secrets/migrations-hml-arn` | ARN da credencial DDL dedicada a `autoshop_hml` | Job de migrations HML |
+| `/auto-shop/staging/database/secrets/migrations-prd-arn` | ARN da credencial DDL dedicada a `autoshop_prd` | Job de migrations PRD |
+| `/auto-shop/staging/database/secrets/owner-arn` | ARN do master secret gerenciado pelo RDS | somente o Job de bootstrap deste repositório |
 | `/auto-shop/staging/database/iam/lambda-read-policy-arn/hml` | ARN da policy de leitura Lambda hml | role da função `lambda-auth` hml |
 | `/auto-shop/staging/database/iam/lambda-read-policy-arn/prd` | ARN da policy de leitura Lambda prd | role da função `lambda-auth` prd |
+| `/auto-shop/staging/database/iam/migrations-hml-read-policy-arn` | policy de leitura do secret migrations HML | role Pod Identity de migrations HML |
+| `/auto-shop/staging/database/iam/migrations-prd-read-policy-arn` | policy de leitura do secret migrations PRD | role Pod Identity de migrations PRD |
 
-Os três parâmetros `/iam/` são aditivos ao contrato dos dez nomes da issue #5. Eles publicam ARNs de policies, nunca valores de credenciais. O root não usa `terraform_remote_state`, `GetParametersByPath`, `SecureString` ou um nome singular `database/name`.
+Os quatro parâmetros `/iam/` publicam ARNs de policies, nunca valores de credenciais. Cada policy de migrations permite ler apenas o secret do respectivo banco. O root não usa `terraform_remote_state`, `GetParametersByPath`, `SecureString` ou um nome singular `database/name`.
 
 O app-runtime não recebe uma policy duplicada neste repositório: o ESO existente no `k8s-infra` já lê `app-runtime-*` dentro do prefixo staging. Esse wildcard de nome é um tradeoff frente ao critério de ARN literal da issue #4 e precisa de revisão entre repositórios.
 
@@ -78,13 +81,15 @@ O app-runtime não recebe uma policy duplicada neste repositório: o ESO existen
 
 | Nome | Criado por | Payload | Acesso |
 |---|---|---|---|
-| `rds!db-<resource-id>` | RDS com `manage_master_user_password=true` | `{username,password}` gerenciado pelo RDS | leitura da role de migrations aprovada |
+| `rds!db-<resource-id>` | RDS com `manage_master_user_password=true` | `{username,password}` gerenciado pelo RDS | leitura somente pela role de bootstrap |
 | `auto-shop/staging/hml/app-runtime` | metadados no Terraform; payload futuro pelo bootstrap | credencial DML de hml | ESO |
 | `auto-shop/staging/prd/app-runtime` | metadados no Terraform; payload futuro pelo bootstrap | credencial DML de prd | ESO |
 | `auto-shop/staging/hml/lambda-auth` | metadados no Terraform; payload futuro pelo bootstrap | credencial read-only de hml | policy Lambda hml |
 | `auto-shop/staging/prd/lambda-auth` | metadados no Terraform; payload futuro pelo bootstrap | credencial read-only de prd | policy Lambda prd |
+| `auto-shop/staging/hml/migrations` | metadados no Terraform; payload futuro pelo bootstrap | credencial DDL limitada a `autoshop_hml` | policy migrations HML |
+| `auto-shop/staging/prd/migrations` | metadados no Terraform; payload futuro pelo bootstrap | credencial DDL limitada a `autoshop_prd` | policy migrations PRD |
 
-Terraform cria somente metadados dos quatro secrets de aplicação; não declara `aws_secretsmanager_secret_version`, não chama `GetSecretValue` e não grava senha em state. Os quatro secrets têm recuperação imediata para que o mesmo nome possa ser recriado na próxima sessão.
+Terraform cria somente metadados dos seis secrets de aplicação; não declara `aws_secretsmanager_secret_version`, não chama `GetSecretValue` e não grava senha em state. Os seis secrets têm recuperação imediata para que o mesmo nome possa ser recriado na próxima sessão. O master secret permanece gerenciado pelo RDS e só é lido pelo Job de bootstrap.
 
 ## Execução
 
@@ -95,7 +100,7 @@ k8s-infra apply foundation e platform (inclui auto-shop-ops)
   -> database-infra plan salvo e guard
   -> database-infra apply
   -> bootstrap-db.sh bootstrap e smoke inicial
-  -> auto-shop-system migrations Alembic com identidade owner
+  -> auto-shop-system migrations Alembic com credencial dedicada por banco
   -> database-infra apply manual com phase=grants
   -> smoke completo hml/prd e prova de restore aprovada
   -> parar consumidores e Lambda
@@ -103,9 +108,9 @@ k8s-infra apply foundation e platform (inclui auto-shop-ops)
   -> k8s-infra destroy e orphan check global, após espera
 ```
 
-Apply requer environment `staging` restrito exatamente à branch `main`, aprovação da sessão e as variáveis `STAGING_ACTIVE=true`, `STAGING_SESSION_AUTHORIZED=true` e `STAGING_SESSION_ID` com o identificador da sessão. O `workflow_dispatch` também exige que `session_id` corresponda à variável ativa. O preflight verifica a conta `035611741563`, a boundary `auto-shop-boundary`, os cinco parâmetros SSM de entrada e o EKS antes do plan/apply.
+Apply é manual via `workflow_dispatch` e requer environment `staging` restrito exatamente à branch `main`, aprovação da sessão e as variáveis `STAGING_ACTIVE=true`, `STAGING_SESSION_AUTHORIZED=true` e `STAGING_SESSION_ID` com o identificador da sessão. O dispatch também exige que `session_id` corresponda à variável ativa; push ou merge em `main` não inicia provisionamento. O preflight verifica a conta `035611741563`, a boundary `auto-shop-boundary`, os cinco parâmetros SSM de entrada e o EKS antes do plan/apply.
 
-O bootstrap operacional está implementado localmente. O Job usa AWS CLI para obter credenciais temporárias e metadados, um init container Python que executa asm-exec para resolver segredos no runtime, postgres:16 para aplicar SQL por TLS e AWS CLI para publicar somente payloads ausentes ou desatualizados via PutSecretValue. Os retries reutilizam os segredos publicados e reaplicam seus verificadores SCRAM aos roles. Credenciais, pgpass, verificadores SCRAM, payloads, CA e temporários do pod ficam no emptyDir em memória; os temporários do orquestrador local ficam em /dev/shm. O comando verify valida o bundle e os digests sem chamar a AWS. A execução real continua condicionada a uma sessão staging protegida e autorizada. O asm-exec e o download do CA precisam de saída HTTPS; essa conectividade ainda não foi validada no EKS.
+O bootstrap operacional está implementado localmente. O Job usa AWS CLI para obter credenciais temporárias e metadados, um init container Python que executa asm-exec para resolver segredos no runtime, postgres:16 para aplicar SQL por TLS e AWS CLI para publicar somente payloads ausentes ou desatualizados via PutSecretValue. Os retries reutilizam os segredos publicados e reaplicam seus verificadores SCRAM aos roles. Credenciais, pgpass, verificadores SCRAM, payloads, CA e temporários do pod ficam no emptyDir em memória. Os temporários do orquestrador local usam /dev/shm por padrão; em hosts sem tmpfs gravável, `BOOTSTRAP_TMP_BASE` e `BOOTSTRAP_ALLOW_NON_TMPFS_TMP=true` permitem indicar um diretório-base existente, privado e controlado pelo operador. O script cria nele um subdiretório com modo restrito. O host guarda metadados SSM, kubeconfig temporário, manifests renderizados, status do Job e logs de comandos; valores de secrets e credenciais AWS do workload ficam no volume `/work` em memória do Job. O operador é responsável por garantir a privacidade e o controle do diretório-base alternativo. O comando verify valida o bundle e os digests sem chamar a AWS. O asm-exec e o download do CA precisam de saída HTTPS; essa conectividade ainda não foi validada no EKS.
 
 `scripts/smoke.sh` sem argumentos executa apenas as verificações de metadados, subnets, rotas, SG, SSM e existência de versões sem ler valores de secret. A fase `initial`, executada depois do bootstrap e antes das migrations, mantém essas verificações. A fase `full`, chamada após migrations e grants, executa o Job para validar TLS com `verify-full`, hostname, autenticação dos roles, privilégio mínimo e isolamento entre os bancos. A inacessibilidade externa do RDS continua sendo evidência de configuração (`PubliclyAccessible=false` e ausência de default routes), não timeout de um runner.
 
@@ -115,9 +120,9 @@ O bootstrap operacional está implementado localmente. O Job usa AWS CLI para ob
 
 O job SQL instala o cliente PostgreSQL e kcov v42, executa `tests/shell-coverage.sh` e falha se a cobertura de linhas executáveis em `scripts/` ficar abaixo de 80% ou se qualquer um dos 10 ramos críticos de autorização/sanitização não for exercitado. O resultado é publicado no resumo do job do GitHub Actions.
 
-`apply.yml` é manual (`workflow_dispatch`) e usa a role existente `AWS_DEPLOY_ROLE_ARN`. Exige sessão ativa e autorizada, serializa no grupo `staging-database`, gera um plano salvo, resume e valida o mesmo JSON e aplica somente o arquivo guardado. Um push ou merge na `main` não inicia provisionamento. Depois de `bootstrap`, executa o smoke `initial`; a fase `grants` executa o smoke `full` depois das migrations. `destroy.yml` pede confirmação `destroy` no dispatch e roda como fallback diário às 01:30 UTC; o horário 30 minutos antes do destroy do `k8s-infra` não garante ordenação. Até existir o gate coordenado `session-down`, o operador deve aguardar o destroy do banco e o orphan scan antes de destruir a rede. Se o EKS já tiver sido removido, o destroy usa o state guardado com `-refresh=false`; falhas de acesso continuam bloqueando a operação e não há `terraform state rm` automático.
+`apply.yml` é manual (`workflow_dispatch`), usa a role existente `AWS_DEPLOY_ROLE_ARN`, exige sessão ativa e autorizada, serializa no grupo `staging-database`, gera um plano salvo, resume e valida o mesmo JSON e aplica somente o arquivo guardado. Depois de `bootstrap`, executa o smoke `initial`; a fase `grants` executa o smoke `full` depois das migrations. `destroy.yml` pede confirmação `destroy` no dispatch e roda como fallback diário às 01:30 UTC; o horário 30 minutos antes do destroy do `k8s-infra` não garante ordenação. Até existir o gate coordenado `session-down`, o operador deve aguardar o destroy do banco e o orphan scan antes de destruir a rede. Se o EKS já tiver sido removido, o destroy usa o state guardado com `-refresh=false`; falhas de acesso continuam bloqueando a operação e não há `terraform state rm` automático.
 
-Actions de terceiros são fixadas por SHA. PRs não usam `pull_request_target` com privilégios de deploy. A `main` exige PR e os quatro checks `staging deployment branch policy`, `Terraform and shell checks`, `PostgreSQL permission integration` e `Read-only staging plan`; aprovação humana é zero, conversas precisam ser resolvidas e force-push/exclusão estão bloqueados. O label `breaking-change` existe. A CI verifica mudanças de nomes contratuais em arquivos Terraform e exige esse label e uma alteração no `CHANGELOG.md` sob `[Unreleased]`.
+Actions de terceiros são fixadas por SHA. PRs não usam `pull_request_target` com privilégios de deploy. A `main` exige PR, os checks `staging deployment branch policy`, `Terraform and shell checks`, `PostgreSQL permission integration` e `Read-only staging plan`, conversas resolvidas, sem aprovação humana obrigatória; force-push e exclusão estão bloqueados. O label `breaking-change` é exigido para mudanças contratuais: a CI compara mudanças em Terraform e pede esse label e uma entrada em `CHANGELOG.md` sob `[Unreleased]`.
 
 ## Custo
 
@@ -127,9 +132,9 @@ Estimativas históricas em `us-east-1`, on-demand, consultadas no plano geral/Pr
 |---|---:|
 | RDS `db.t4g.micro`, PostgreSQL Single-AZ | 0,016 |
 | 20 GiB gp3 | 0,0032 |
-| Quatro secrets de aplicação | 0,0022 |
+| Seis secrets de aplicação | 0,0033 |
 | Master secret gerenciado pelo RDS | 0,0006 |
-| **Total fixo estimado deste root** | **~0,022** |
+| **Total fixo estimado deste root** | **~0,023** |
 
 Backups, restore, requests do Secrets Manager, tráfego/NAT, armazenamento excedente e créditos de CPU podem alterar o total. Cinco horas dão aproximadamente US$ 0,11 apenas nas parcelas fixas acima; isso não é cotação, teto, garantia de gratuidade nem inclui a sessão do cluster. Compare com billing real e evite somar RDS duas vezes à estimativa de `k8s-infra`.
 
@@ -138,8 +143,9 @@ Backups, restore, requests do Secrets Manager, tráfego/NAT, armazenamento exced
 - Uma única instância staging privada, sem Multi-AZ, subnets isoladas em duas AZs e SG com ingress TCP/5432 somente dos SGs EKS e Lambda; nenhum egress do SG RDS.
 - PostgreSQL 16.15, criptografia com chave gerenciada AWS, TLS obrigatório (`rds.force_ssl=1`), backup de um dia e teardown sem snapshot final/backups retidos.
 - Uma única role de workload criada neste root, path `/auto-shop/`, boundary obrigatória e trust da Pod Identity condicionada ao ARN do cluster e à conta exata.
-- Policies do bootstrap limitam a leitura do master e dos quatro secrets de aplicação aos ARNs exatos; a leitura das versões existentes serve ao retry idempotente via asm-exec. PutSecretValue também se limita aos quatro ARNs.
-- SQL separa owner, runtime DML e Lambda SELECT por coluna; remove TEMP, CREATE, memberships e grants mais amplos.
+- Policies do bootstrap limitam a leitura do master e dos seis secrets de aplicação aos ARNs exatos; a leitura das versões existentes serve ao retry idempotente via asm-exec. PutSecretValue também se limita aos seis ARNs.
+- Policies de migrations HML/PRD leem apenas o secret do respectivo banco. As credenciais SQL de migrations não têm superuser, CREATEDB ou CREATEROLE, e recebem CREATE somente no schema do banco autorizado.
+- SQL separa owner, migrations DDL, runtime DML e Lambda SELECT por coluna; o role de migrations define defaults de DML para objetos novos e a fase `grants` reconcilia objetos existentes após Alembic. TEMP, memberships e grants mais amplos são removidos.
 - Guard de plano rejeita RDS público, regras SG inline/CIDR, egress, proxy, versões de secret, geradores de senha, valores de conexão e unknowns críticos.
 - Resumo/guard leem um plano salvo e publicam apenas endereços, ações e códigos fixos; logs e JSON temporários ficam privados e são apagados.
 - Smoke/orphan scan usam nomes e ARNs precisos, só consultam metadados e falham em erro de consulta ou recurso remanescente.
@@ -147,20 +153,22 @@ Backups, restore, requests do Secrets Manager, tráfego/NAT, armazenamento exced
 
 ## Checkov
 
-O scanner fixado no workflow roda sem uma lista global de skips. Existem dez skips inline, cada um limitado ao recurso afetado: dois `CKV2_AWS_34` para parâmetros `String`/`StringList` sem segredos; um `CKV2_AWS_5` para a referência do SG entre módulos; dois `CKV_AWS_149` para uso da chave AWS gerenciada pelo Secrets Manager; e cinco no RDS (`CKV_AWS_161`, `CKV_AWS_129`, `CKV_AWS_211`, `CKV_AWS_157`, `CKV_AWS_118`) para autenticação SCRAM em vez de IAM, ausência de exportação de query logs, CA G1 com rotação automática, Single-AZ de staging e Enhanced Monitoring desabilitado por custo. O CI validou essas justificativas com Checkov 2.0.930: 54 aprovados, zero falhas e dez skips.
+O scanner fixado no workflow roda sem uma lista global de skips. Há dez skips inline, limitados ao recurso afetado: dois `CKV2_AWS_34` para parâmetros `String`/`StringList` sem segredos; um `CKV2_AWS_5` para a referência do SG entre módulos; dois `CKV_AWS_149` para uso da chave AWS gerenciada pelo Secrets Manager; e cinco no RDS (`CKV_AWS_161`, `CKV_AWS_129`, `CKV_AWS_211`, `CKV_AWS_157`, `CKV_AWS_118`) para autenticação SCRAM em vez de IAM, ausência de exportação de query logs, CA G1 com rotação automática, Single-AZ de staging e Enhanced Monitoring desabilitado por custo. O CI validou essas justificativas com Checkov 2.0.930: 54 aprovados, zero falhas e dez skips.
 
 ## Limitações conhecidas
 
 - O bootstrap não está ponta-a-ponta: imagem, digest, disponibilidade de `asm-exec`, comportamento non-root, CA, `verify-full`, retry após falha parcial e canário de logs precisam de validação antes de liberar apply.
-- O Job de migrations owner, sua role/ServiceAccount/association e a montagem de DSN em memória pertencem à integração do `auto-shop-system`; master secret não deve ser sincronizado pelo ESO.
-- O disparo da fase `grants` é manual via input `phase` após Alembic; ainda depende do owner do pipeline consumidor.
-- Pod Identity através da NetworkPolicy strict e contrato `session-down` entre este repositório e `k8s-infra` precisam de prova/revisão. A policy wildcard atual do External Secrets Operator também precisa ser substituída por leitura do ARN exato de cada segredo `app_runtime`; este repositório ainda não publica uma policy exata para o consumidor da aplicação.
+- A role/ServiceAccount/association de migrations e a montagem da DSN em memória pertencem à integração do `auto-shop-system`; o Job usa apenas a credencial DDL dedicada e nunca lê o master secret. Master secret não deve ser sincronizado pelo ESO.
+- A fase `grants` continua manual via input `phase` após Alembic para reconciliar as permissões dos objetos atuais; defaults atribuídos ao role de migrations cobrem objetos futuros.
+- A policy de `auto-shop-ops` libera o Pod Identity agent somente em `169.254.170.23/32`, nas portas TCP `80` e `2703`; a conectividade ponta a ponta ainda precisa de validação em staging. O contrato `session-down` entre este repositório e `k8s-infra` também aguarda prova.
+- A policy do External Secrets Operator ainda usa wildcard para os secrets `app-runtime`; alinhar uma restrição por ARN com os consumidores antes de ampliar o uso.
 - O adapter de `lambda-auth` ainda exige `sslmode=require`; deve mudar para `verify-full` com CA e teste antes de demonstrar o fluxo completo.
-- A prova de restore, lock S3 concorrente, sessão de até cinco horas, destruição e custo real ainda não foram executados. O último plan do CI pulou a etapa Terraform porque contratos upstream/EKS não estavam prontos; o apply requer uma sessão autorizada. ADR e documentação sobre Free/Paid também precisam reconciliação pelo titular.
+- A prova de restore, lock S3 concorrente, sessão de até cinco horas, destruição e custo real não foram executados. ADR e documentação sobre Free/Paid também precisam reconciliação pelo titular.
 
 ## Política de compatibilidade
 
 Renomear ou remover qualquer parâmetro SSM, output público ou nome de secret é uma mudança breaking: o PR precisa do label `breaking-change` e uma entrada neste `CHANGELOG.md` sob `[Unreleased]`. A CI inspeciona diffs nos arquivos Terraform que definem outputs, parâmetros e nomes de segredos; mudanças aditivas no contrato `/database/iam/` também precisam ser acordadas com os consumidores antes de publicar.
+
 ## Decisões e modelo de dados
 
 A justificativa compartilhada do banco e seu diagrama ER estão no [auto-shop-system](https://github.com/Software-Architecture-Group-7-FIAP/auto-shop-system/blob/develop/docs/architecture/justificativa-banco-postgresql.md).
