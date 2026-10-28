@@ -52,6 +52,41 @@ awk -v percentage="$coverage_percent" 'BEGIN { exit !(percentage >= 80) }' \
     printf 'Per-file shell coverage:\n' >&2
     "$jq_bin" -r '.files[] | "\(.percent_covered)%\t\(.covered_lines)/\(.total_lines)\t\(.file)"' \
       "$coverage_json" >&2
+    coverage_xml="$(find "$merged_output" -type f -name '*.xml' -print -quit)"
+    if [[ -n "$coverage_xml" ]]; then
+      printf 'Uncovered executable shell lines:\n' >&2
+      python3 - "$coverage_xml" <<'PY' >&2
+import sys
+import xml.etree.ElementTree as ET
+from pathlib import Path
+
+expected = {
+    "bootstrap-db.sh",
+    "orphans.sh",
+    "plan-guard.sh",
+    "plan-summary.sh",
+    "smoke.sh",
+    "ssm-get-parameters.sh",
+}
+found = set()
+for coverage_class in ET.parse(sys.argv[1]).iter("class"):
+    filename = Path(coverage_class.get("filename", "")).name
+    if filename not in expected:
+        continue
+    found.add(filename)
+    missed = [
+        line.get("number", "?")
+        for line in coverage_class.iter("line")
+        if int(line.get("hits", "0")) == 0
+    ]
+    print(f"{filename}: {', '.join(missed) if missed else 'none'}")
+
+for filename in sorted(expected - found):
+    print(f"{filename}: no Cobertura class found")
+PY
+    else
+      printf 'Kcov did not produce a Cobertura XML report.\n' >&2
+    fi
     fail "executable shell line coverage ${coverage_percent}% is below the required 80%"
   }
 
