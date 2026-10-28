@@ -1,8 +1,6 @@
 name: Apply database staging
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
     inputs:
       session_id:
