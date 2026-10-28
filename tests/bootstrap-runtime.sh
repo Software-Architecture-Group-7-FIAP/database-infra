@@ -15,7 +15,9 @@ fail() {
 
 export BOOTSTRAP_SSM_FIXTURE="$tmp_dir/parameters.json"
 export BOOTSTRAP_AWS_CALLS="$tmp_dir/aws-calls.log"
+export BOOTSTRAP_AWS_BATCH_COUNT="$tmp_dir/aws-batch-count"
 export BOOTSTRAP_KUBECTL_CALLS="$tmp_dir/kubectl-calls.log"
+: > "$BOOTSTRAP_AWS_BATCH_COUNT"
 
 cat > "$bin_dir/aws" <<'FAKE_AWS'
 #!/usr/bin/env bash
@@ -33,24 +35,13 @@ case "$*" in
     if [[ "${BOOTSTRAP_AWS_MODE:-success}" == fail-ssm ]]; then
       exit 1
     fi
-    requested_names=()
-    collecting_names=false
-    for argument in "$@"; do
-      if [[ "$collecting_names" == true ]]; then
-        [[ "$argument" == --output ]] && break
-        requested_names+=("$argument")
-      elif [[ "$argument" == --names ]]; then
-        collecting_names=true
-      fi
-    done
-    requested_names_json="$(printf '%s\n' "${requested_names[@]}" | jq -R . | jq -s .)"
-    jq --argjson requested "$requested_names_json" '
-      . as $fixture |
-      {
-        Parameters: [$fixture.Parameters[]? | select(.Name as $name | ($requested | index($name)) != null)],
-        InvalidParameters: [$requested[] as $name | select(any($fixture.Parameters[]?; .Name == $name) | not)]
-      }
-    ' "$BOOTSTRAP_SSM_FIXTURE"
+    batch_index="$(<"$BOOTSTRAP_AWS_BATCH_COUNT")"
+    printf '%s\n' "$((batch_index + 1))" > "$BOOTSTRAP_AWS_BATCH_COUNT"
+    if [[ "$batch_index" -eq 0 ]]; then
+      jq '.Parameters |= .[0:10]' "$BOOTSTRAP_SSM_FIXTURE"
+    else
+      jq '.Parameters |= .[10:20]' "$BOOTSTRAP_SSM_FIXTURE"
+    fi
     ;;
   'eks update-kubeconfig '*)
     [[ "${BOOTSTRAP_AWS_FAIL_KUBECONFIG:-false}" != true ]]
@@ -123,6 +114,7 @@ cat > "$BOOTSTRAP_SSM_FIXTURE" <<'PARAMETERS'
 }
 PARAMETERS
 
+: > "$BOOTSTRAP_AWS_BATCH_COUNT"
 PATH="$bin_dir:$PATH" bash "$repo_root/scripts/bootstrap-db.sh" bootstrap > "$tmp_dir/bootstrap.out"
 grep -Fq 'PASS: database Job phase bootstrap completed' "$tmp_dir/bootstrap.out" \
   || { printf 'FAIL: bootstrap runtime did not complete against local fixtures\n' >&2; exit 1; }
@@ -147,6 +139,7 @@ expect_bootstrap_failure() {
   local aws_mode="${7:-success}"
   local output="$tmp_dir/$label.out"
 
+  : > "$BOOTSTRAP_AWS_BATCH_COUNT"
   if PATH="$bin_dir:$PATH" \
     BOOTSTRAP_SSM_FIXTURE="$fixture" \
     BOOTSTRAP_AWS_ACCOUNT="$account" \
