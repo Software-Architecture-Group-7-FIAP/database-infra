@@ -206,7 +206,15 @@ case "$arguments" in
         ;;
     esac
     ;;
-  *"iam get-role"*|*"iam get-policy"*) printf 'NoSuchEntity: no such IAM resource\n' >&2; exit 255 ;;
+  *"iam get-role"*) printf 'NoSuchEntity: no such IAM role\n' >&2; exit 255 ;;
+  *"iam get-policy"*)
+    if [[ "${ORPHAN_TEST_LEGACY_POLICY_MODE:-absent}" == present && "$arguments" == *"auto-shop-staging-db-read-owner"* ]]; then
+      printf '{"Policy":{"PolicyName":"auto-shop-staging-db-read-owner"}}\n'
+    else
+      printf 'NoSuchEntity: no such IAM policy\n' >&2
+      exit 255
+    fi
+    ;;
   *"ssm get-parameter --name"*) printf '{"Parameter":{"Value":"auto-shop-staging"}}\n' ;;
   *"eks describe-cluster"*) printf '{"cluster":{"name":"auto-shop-staging"}}\n' ;;
   *"eks list-pod-identity-associations"*) printf '{"associations":[]}\n' ;;
@@ -226,7 +234,11 @@ case "$arguments" in
     done
     [[ "$requested_name_count" -le 10 ]] || { printf 'ValidationException: GetParameters accepts at most 10 names\n' >&2; exit 254; }
     printf '%s\n' "$requested_name_count" >> "$ORCHESTRATION_TEST_SSM_BATCH_LOG"
-    printf '{"Parameters":[],"InvalidParameters":[]}\n'
+    if [[ "${ORPHAN_TEST_LEGACY_SSM_MODE:-absent}" == present && "$arguments" == *"/database/iam/owner-read-policy-arn"* ]]; then
+      printf '{"Parameters":[{"Name":"/auto-shop/staging/database/iam/owner-read-policy-arn"}],"InvalidParameters":[]}\n'
+    else
+      printf '{"Parameters":[],"InvalidParameters":[]}\n'
+    fi
     ;;
   *) printf 'unexpected AWS metadata command\n' >&2; exit 97 ;;
 esac
@@ -265,10 +277,34 @@ fi
 ORCHESTRATION_TEST_SSM_BATCH_LOG="$tmp_dir/orphans-batches.log" AWS_BIN="$tmp_dir/bin/orphan-aws" \
   bash "$repo_root/scripts/orphans.sh" "$tmp_dir/manifest.json" > "$tmp_dir/orphans.out"
 grep -Fq 'PASS: database-infra orphan scan completed' "$tmp_dir/orphans.out" || fail 'orphan scan did not complete against empty fixtures'
-printf '10\n6\n' > "$tmp_dir/expected-ssm-batches.log"
+printf '10\n7\n' > "$tmp_dir/expected-ssm-batches.log"
 cmp -s "$tmp_dir/expected-ssm-batches.log" "$tmp_dir/orphans-batches.log" || fail 'orphan scan did not query all published parameters in 10-name batches'
 if grep -Fq 'CANARY_SECRET_VALUE' "$tmp_dir/orphans.out"; then
   fail 'orphan scan leaked a canary value'
+fi
+
+if ORPHAN_TEST_LEGACY_POLICY_MODE=present \
+  ORCHESTRATION_TEST_SSM_BATCH_LOG="$tmp_dir/orphans-legacy-policy-batches.log" \
+  AWS_BIN="$tmp_dir/bin/orphan-aws" \
+  bash "$repo_root/scripts/orphans.sh" "$tmp_dir/manifest.json" > "$tmp_dir/orphans-legacy-policy.out" 2>&1; then
+  fail 'orphan scan accepted the legacy owner-read IAM policy'
+else
+  status=$?
+  [[ "$status" -eq 1 ]] || fail "legacy owner-read IAM policy detection returned $status instead of a closed failure"
+  grep -Fq 'FAIL: orphan detected: managed IAM policy auto-shop-staging-db-read-owner' \
+    "$tmp_dir/orphans-legacy-policy.out" || fail 'orphan scan did not reject the legacy owner-read IAM policy'
+fi
+
+if ORPHAN_TEST_LEGACY_SSM_MODE=present \
+  ORCHESTRATION_TEST_SSM_BATCH_LOG="$tmp_dir/orphans-legacy-ssm-batches.log" \
+  AWS_BIN="$tmp_dir/bin/orphan-aws" \
+  bash "$repo_root/scripts/orphans.sh" "$tmp_dir/manifest.json" > "$tmp_dir/orphans-legacy-ssm.out" 2>&1; then
+  fail 'orphan scan accepted the legacy owner-read SSM parameter'
+else
+  status=$?
+  [[ "$status" -eq 1 ]] || fail "legacy owner-read SSM detection returned $status instead of a closed failure"
+  grep -Fq 'FAIL: orphan detected or ownership query incomplete: published database SSM parameters' \
+    "$tmp_dir/orphans-legacy-ssm.out" || fail 'orphan scan did not reject the legacy owner-read SSM parameter'
 fi
 
 if ORPHAN_TEST_TAG_MODE=present AWS_BIN="$tmp_dir/bin/orphan-aws" \

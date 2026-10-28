@@ -164,6 +164,7 @@ fi
 
 assert_named_resource_absent 'bootstrap IAM role' bootstrap_role iam get-role --role-name auto-shop-staging-db-bootstrap
 for policy_name in \
+  auto-shop-staging-db-read-owner \
   auto-shop-staging-db-read-migrations-hml \
   auto-shop-staging-db-read-migrations-prd \
   auto-shop-staging-db-read-lambda-hml \
@@ -199,6 +200,7 @@ output_parameter_names=(
   /auto-shop/staging/database/secrets/migrations-hml-arn
   /auto-shop/staging/database/secrets/migrations-prd-arn
   /auto-shop/staging/database/secrets/owner-arn
+  /auto-shop/staging/database/iam/owner-read-policy-arn
   /auto-shop/staging/database/iam/lambda-read-policy-arn/hml
   /auto-shop/staging/database/iam/lambda-read-policy-arn/prd
   /auto-shop/staging/database/iam/migrations-hml-read-policy-arn
