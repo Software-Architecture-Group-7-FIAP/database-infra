@@ -277,8 +277,9 @@ fi
 ORCHESTRATION_TEST_SSM_BATCH_LOG="$tmp_dir/orphans-batches.log" AWS_BIN="$tmp_dir/bin/orphan-aws" \
   bash "$repo_root/scripts/orphans.sh" "$tmp_dir/manifest.json" > "$tmp_dir/orphans.out"
 grep -Fq 'PASS: database-infra orphan scan completed' "$tmp_dir/orphans.out" || fail 'orphan scan did not complete against empty fixtures'
-printf '10\n7\n' > "$tmp_dir/expected-ssm-batches.log"
-cmp -s "$tmp_dir/expected-ssm-batches.log" "$tmp_dir/orphans-batches.log" || fail 'orphan scan did not query all published parameters in 10-name batches'
+printf '10\n6\n' > "$tmp_dir/expected-ssm-batches.log"
+printf '10\n7\n' > "$tmp_dir/expected-orphan-ssm-batches.log"
+cmp -s "$tmp_dir/expected-orphan-ssm-batches.log" "$tmp_dir/orphans-batches.log" || fail 'orphan scan did not query all published parameters in 10-name batches'
 if grep -Fq 'CANARY_SECRET_VALUE' "$tmp_dir/orphans.out"; then
   fail 'orphan scan leaked a canary value'
 fi
@@ -354,7 +355,7 @@ run_orphan_secret_case() {
   fi
 
   if [[ "$expected" == pass ]]; then
-    cmp -s "$tmp_dir/expected-ssm-batches.log" "$tmp_dir/orphans-$mode-batches.log" || fail "orphan polling did not batch all published parameters for $mode"
+    cmp -s "$tmp_dir/expected-orphan-ssm-batches.log" "$tmp_dir/orphans-$mode-batches.log" || fail "orphan polling did not batch all published parameters for $mode"
   fi
 
   case "$mode" in
