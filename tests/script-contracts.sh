@@ -222,6 +222,33 @@ SH
 chmod +x "$tmp_dir/bin/orphan-aws"
 assert_secret_value_apis_denied "$tmp_dir/bin/orphan-aws"
 printf '{}\n' > "$tmp_dir/manifest.json"
+
+if bash "$repo_root/scripts/orphans.sh" "$tmp_dir/missing-manifest.json" > "$tmp_dir/orphans-missing-manifest.out" 2>&1; then
+  fail 'orphan scan accepted a missing Terraform manifest'
+else
+  grep -Fq 'FAIL: Terraform metadata manifest is not readable' "$tmp_dir/orphans-missing-manifest.out" || fail 'orphan scan did not reject a missing manifest'
+fi
+
+printf '{"connection_string":"postgresql://synthetic-fixture"}\n' > "$tmp_dir/unsafe-manifest.json"
+if bash "$repo_root/scripts/orphans.sh" "$tmp_dir/unsafe-manifest.json" > "$tmp_dir/orphans-unsafe-manifest.out" 2>&1; then
+  fail 'orphan scan accepted a manifest containing a connection string'
+else
+  grep -Fq 'FAIL: Terraform metadata manifest is invalid or contains a prohibited connection value' "$tmp_dir/orphans-unsafe-manifest.out" || fail 'orphan scan did not reject connection values in a manifest'
+fi
+
+if AWS_BIN=missing-orphan-aws bash "$repo_root/scripts/orphans.sh" "$tmp_dir/manifest.json" > "$tmp_dir/orphans-missing-aws.out" 2>&1; then
+  fail 'orphan scan accepted a missing AWS CLI'
+else
+  grep -Fq 'FAIL: aws CLI is required' "$tmp_dir/orphans-missing-aws.out" || fail 'orphan scan did not report a missing AWS CLI'
+fi
+
+if JQ_BIN=missing-orphan-jq AWS_BIN="$tmp_dir/bin/orphan-aws" \
+  bash "$repo_root/scripts/orphans.sh" "$tmp_dir/manifest.json" > "$tmp_dir/orphans-missing-jq.out" 2>&1; then
+  fail 'orphan scan accepted a missing jq executable'
+else
+  grep -Fq 'FAIL: jq is required' "$tmp_dir/orphans-missing-jq.out" || fail 'orphan scan did not report a missing jq executable'
+fi
+
 : > "$tmp_dir/orphans-batches.log"
 ORCHESTRATION_TEST_SSM_BATCH_LOG="$tmp_dir/orphans-batches.log" AWS_BIN="$tmp_dir/bin/orphan-aws" \
   bash "$repo_root/scripts/orphans.sh" "$tmp_dir/manifest.json" > "$tmp_dir/orphans.out"
