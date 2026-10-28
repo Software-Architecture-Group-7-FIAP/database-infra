@@ -64,6 +64,7 @@ expected = {
     "orphans.sh",
     "plan-guard.sh",
     "plan-summary.sh",
+    "private-tmp.sh",
     "smoke.sh",
     "ssm-get-parameters.sh",
 }

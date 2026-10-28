@@ -5,6 +5,8 @@ script_dir="$(cd "$(dirname "$0")" && pwd)"
 repo_root="$(cd "$script_dir/.." && pwd)"
 # shellcheck disable=SC1091
 source "$script_dir/ssm-get-parameters.sh"
+# shellcheck source=scripts/private-tmp.sh
+source "$script_dir/private-tmp.sh"
 
 NAMESPACE="auto-shop-ops"
 JOB_NAME="auto-shop-db-bootstrap"
@@ -74,8 +76,11 @@ tmp_base="${BOOTSTRAP_TMP_BASE:-/dev/shm}"
 if [[ "$tmp_base" == /dev/shm ]]; then
   [[ -d /dev/shm && -w /dev/shm ]] || fail 'tmpfs storage is required for bootstrap temporaries'
 else
-  [[ "${BOOTSTRAP_ALLOW_NON_TMPFS_TMP:-false}" == true && "$tmp_base" == /* && -d "$tmp_base" && -w "$tmp_base" ]] || \
+  [[ "${BOOTSTRAP_ALLOW_NON_TMPFS_TMP:-false}" == true ]] || \
     fail 'non-tmpfs bootstrap temporaries require an explicit private directory opt-in'
+  if ! tmp_base="$(private_tmp_base "$tmp_base")"; then
+    fail 'non-tmpfs bootstrap temporary directory must be private, owned by the caller, and have safe parent directories'
+  fi
 fi
 # Host-side files include SSM metadata, kubeconfig, rendered manifests, Job status, and command logs. Keep a non-tmpfs base private and operator-controlled; secret payloads and AWS workload credentials stay in the Job's memory-backed /work volume.
 tmp_dir="$(mktemp -d "${tmp_base%/}/database-bootstrap.XXXXXX")"

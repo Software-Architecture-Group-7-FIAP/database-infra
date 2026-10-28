@@ -120,6 +120,7 @@ violations="$("$jq_bin" -r '
     if any(resources[]; .type == "aws_vpc_security_group_egress_rule" and changes_after) then "egress_rule_prohibited" else empty end,
     if any(resources[]; .type == "aws_security_group_rule" and changes_after) then "legacy_security_group_rule_prohibited" else empty end,
     if any(resources[]; .type == "aws_security_group" and changes_after and (sg_has_inline_rules($plan; .) or unknown("egress") or ((after.egress // []) | length > 0))) then "inline_security_group_rules_prohibited" else empty end,
+    if any(resources[]; .type == "aws_db_instance" and (((.change.actions // []) | index("delete")) != null)) then "rds_deletion_prohibited" else empty end,
     if any(resources[]; .type == "aws_db_instance" and changes_after and rds_invalid($plan; .)) then "rds_invariant_failed_or_unknown" else empty end,
     if any(resources[]; .type == "aws_vpc_security_group_ingress_rule" and changes_after and (
       unknown("ip_protocol") or

@@ -5,6 +5,8 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "$tmp_dir"' EXIT
 
+bash "$repo_root/tests/private-tmp.sh"
+
 fail() {
   printf 'FAIL: %s\n' "$1" >&2
   exit 1
@@ -147,7 +149,17 @@ cat > "$tmp_dir/bin/orphan-aws" <<'SH'
 arguments="$*"
 case "$arguments" in
   *"get-secret-value"*|*"get-parameters-by-path"*|*"GetSecretValue"*|*"GetParametersByPath"*) printf 'prohibited API request\n' >&2; exit 98 ;;
-  *"resourcegroupstaggingapi get-resources"*) printf '{"ResourceTagMappingList":[]}\n' ;;
+  *"resourcegroupstaggingapi get-resources"*)
+    case "${ORPHAN_TEST_TAG_MODE:-empty}" in
+      empty) printf '{"ResourceTagMappingList":[]}\n' ;;
+      present) printf '{"ResourceTagMappingList":[{"ResourceARN":"arn:aws:rds:us-east-1:035611741563:db:orphan"}]}\n' ;;
+      query-error)
+        printf 'AccessDeniedException: resource metadata query denied\n' >&2
+        exit 255
+        ;;
+      *) printf 'unexpected orphan tag mode\n' >&2; exit 97 ;;
+    esac
+    ;;
   *"rds describe-db-instances"*) printf 'DBInstanceNotFound: no such staging instance\n' >&2; exit 255 ;;
   *"rds describe-db-snapshots"*) printf '{"DBSnapshots":[]}\n' ;;
   *"rds describe-db-instance-automated-backups"*) printf '{"DBInstanceAutomatedBackups":[]}\n' ;;
@@ -257,6 +269,26 @@ printf '10\n6\n' > "$tmp_dir/expected-ssm-batches.log"
 cmp -s "$tmp_dir/expected-ssm-batches.log" "$tmp_dir/orphans-batches.log" || fail 'orphan scan did not query all published parameters in 10-name batches'
 if grep -Fq 'CANARY_SECRET_VALUE' "$tmp_dir/orphans.out"; then
   fail 'orphan scan leaked a canary value'
+fi
+
+if ORPHAN_TEST_TAG_MODE=present AWS_BIN="$tmp_dir/bin/orphan-aws" \
+  bash "$repo_root/scripts/orphans.sh" "$tmp_dir/manifest.json" > "$tmp_dir/orphans-tagged-resource.out" 2>&1; then
+  fail 'orphan scan accepted a tagged resource still present in AWS'
+else
+  status=$?
+  [[ "$status" -eq 1 ]] || fail "tagged resource detection returned $status instead of a closed failure"
+  grep -Fq 'FAIL: orphan detected or ownership query incomplete: all tagged database-infra resources' \
+    "$tmp_dir/orphans-tagged-resource.out" || fail 'orphan scan did not reject a tagged resource'
+fi
+
+if ORPHAN_TEST_TAG_MODE=query-error AWS_BIN="$tmp_dir/bin/orphan-aws" \
+  bash "$repo_root/scripts/orphans.sh" "$tmp_dir/manifest.json" > "$tmp_dir/orphans-tag-query-error.out" 2>&1; then
+  fail 'orphan scan accepted a failed AWS ownership query'
+else
+  status=$?
+  [[ "$status" -eq 1 ]] || fail "ownership query failure returned $status instead of a closed failure"
+  grep -Fq 'FAIL: tagged_resources metadata query failed' "$tmp_dir/orphans-tag-query-error.out" ||
+    fail 'orphan scan did not report an AWS ownership query failure'
 fi
 
 run_orphan_secret_case() {
