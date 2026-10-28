@@ -159,6 +159,17 @@ expect_bootstrap_failure() {
   if ! grep -Fq "FAIL: $expected" "$output"; then
     local observed_failure
     observed_failure="$(sed -nE 's/^(FAIL: [[:alnum:]_ /-]+).*/\1/p' "$output" | head -n 1 || true)"
+    if [[ -z "$observed_failure" ]]; then
+      if grep -Fq 'jq: error:' "$output"; then
+        observed_failure='jq command error'
+      elif grep -Fq 'command not found' "$output"; then
+        observed_failure='command not found'
+      elif [[ -s "$output" ]]; then
+        observed_failure='unrecognized output (details suppressed)'
+      else
+        observed_failure='empty output'
+      fi
+    fi
     fail "bootstrap $label returned ${observed_failure:-no sanitized failure}, not the expected error"
   fi
 }
