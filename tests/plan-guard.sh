@@ -183,6 +183,11 @@ expect_rejected() {
 run_guard "$tmp_dir/valid.json" > "$tmp_dir/valid.out"
 grep -Fq 'PASS' "$tmp_dir/valid.out"
 
+"$jq_bin" '.resource_changes[0].change.after.db_name = ""' \
+  "$tmp_dir/valid.json" > "$tmp_dir/empty_db_name.json"
+run_guard "$tmp_dir/empty_db_name.json" > "$tmp_dir/empty_db_name.out"
+grep -Fq 'PASS' "$tmp_dir/empty_db_name.out" || { printf 'FAIL: provider-normalized empty db_name was rejected\n' >&2; exit 1; }
+
 "$jq_bin" '.resource_changes[0].change.after_unknown.kms_key_id = true' \
   "$tmp_dir/valid.json" > "$tmp_dir/initial_managed_kms.json"
 run_guard "$tmp_dir/initial_managed_kms.json" > "$tmp_dir/initial_managed_kms.out"
@@ -232,6 +237,8 @@ expect_rejected unknown_rds_public_flag '.resource_changes[0].change.after_unkno
 grep -Fq 'rds_invalid_fields:publicly_accessible_unknown' "$tmp_dir/unknown_rds_public_flag.out" || { printf 'FAIL: unknown RDS invariant diagnostics did not identify the property without values\n' >&2; exit 1; }
 expect_rejected rds_deletion '.resource_changes[0].change.actions = ["delete"] | .resource_changes[0].change.after = null'
 grep -Fq 'rds_deletion_prohibited' "$tmp_dir/rds_deletion.out" || { printf 'FAIL: pure RDS deletion did not report the dedicated guard violation\n' >&2; exit 1; }
+expect_rejected rds_db_name_present '.resource_changes[0].change.after.db_name = "unexpected"'
+grep -Fq 'rds_invalid_fields:db_name' "$tmp_dir/rds_db_name_present.out" || { printf 'FAIL: unexpected initial RDS database name was not rejected\n' >&2; exit 1; }
 
-printf 'PASS: valid and refreshed managed-key/security-group fixtures accepted; %s invalid fixtures rejected without printing canary values\n' 24
+printf 'PASS: valid, empty db_name, and refreshed managed-key/security-group fixtures accepted; %s invalid fixtures rejected without printing canary values\n' 25
 record_critical_branch plan_guard_replacement_unknown_and_redaction

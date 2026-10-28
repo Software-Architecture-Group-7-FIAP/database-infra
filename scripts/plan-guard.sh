@@ -109,7 +109,7 @@ violations="$("$jq_bin" -r '
     ($resource.change.after.backup_retention_period != 1) or
     ($resource.change.after.manage_master_user_password != true) or
     ($resource.change.after.password != null) or
-    ($resource.change.after.db_name != null) or
+    ($resource.change.after.db_name != null and $resource.change.after.db_name != "") or
     ($resource.change.after.username != "autoshop_owner");
   def rds_invalid_fields($plan; $resource):
     [
@@ -144,7 +144,7 @@ violations="$("$jq_bin" -r '
       if $resource.change.after.backup_retention_period != 1 then "backup_retention_period" else empty end,
       if $resource.change.after.manage_master_user_password != true then "manage_master_user_password" else empty end,
       if $resource.change.after.password != null then "password" else empty end,
-      if $resource.change.after.db_name != null then "db_name" else empty end,
+      if ($resource.change.after.db_name != null and $resource.change.after.db_name != "") then "db_name" else empty end,
       if $resource.change.after.username != "autoshop_owner" then "username" else empty end
     ];
   . as $plan |
