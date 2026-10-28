@@ -29,5 +29,7 @@ if [[ "$PHASE" == "bootstrap" ]]; then
   record_secret_state runtime-prd "$RUNTIME_PRD_SECRET_ARN"
   record_secret_state lambda-hml "$LAMBDA_HML_SECRET_ARN"
   record_secret_state lambda-prd "$LAMBDA_PRD_SECRET_ARN"
+  record_secret_state migrations-hml "$MIGRATIONS_HML_SECRET_ARN"
+  record_secret_state migrations-prd "$MIGRATIONS_PRD_SECRET_ARN"
 fi
 rm -f /work/aws-credentials.stderr /work/meta-*.stderr

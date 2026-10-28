@@ -49,15 +49,21 @@ expect_permission_denied() {
 
 if [[ "$PHASE" == "bootstrap" ]]; then
   run_psql_file hml autoshop_owner /work/bootstrap-hml.sql
+  run_psql_file hml autoshop_migrations_hml /work/migration-defaults-hml.sql
   run_psql_file prd autoshop_owner /work/bootstrap-prd.sql
+  run_psql_file prd autoshop_migrations_prd /work/migration-defaults-prd.sql
 elif [[ "$PHASE" == "grants" ]]; then
-  run_psql_file hml autoshop_owner /work/grants-hml.sql
-  run_psql_file prd autoshop_owner /work/grants-prd.sql
+  run_psql_file hml autoshop_migrations_hml /work/grants-hml.sql
+  run_psql_file prd autoshop_migrations_prd /work/grants-prd.sql
 elif [[ "$PHASE" == "smoke" ]]; then
   check_true "$DB_NAME_HML" app_runtime_hml runtime-hml \
     "SELECT current_user = 'app_runtime_hml' AND has_database_privilege(current_user, current_database(), 'CONNECT') AND has_table_privilege(current_user, 'public.customers', 'SELECT') AND has_table_privilege(current_user, 'public.customers', 'INSERT') AND has_table_privilege(current_user, 'public.customers', 'UPDATE') AND has_table_privilege(current_user, 'public.customers', 'DELETE') AND NOT has_schema_privilege(current_user, 'public', 'CREATE') AND COALESCE((SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()), false)"
   check_true "$DB_NAME_PRD" app_runtime_prd runtime-prd \
     "SELECT current_user = 'app_runtime_prd' AND has_database_privilege(current_user, current_database(), 'CONNECT') AND has_table_privilege(current_user, 'public.customers', 'SELECT') AND has_table_privilege(current_user, 'public.customers', 'INSERT') AND has_table_privilege(current_user, 'public.customers', 'UPDATE') AND has_table_privilege(current_user, 'public.customers', 'DELETE') AND NOT has_schema_privilege(current_user, 'public', 'CREATE') AND COALESCE((SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()), false)"
+  check_true "$DB_NAME_HML" autoshop_migrations_hml migrations-hml \
+    "SELECT current_user = 'autoshop_migrations_hml' AND has_database_privilege(current_user, current_database(), 'CONNECT') AND has_schema_privilege(current_user, 'public', 'CREATE') AND NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = current_user AND (rolsuper OR rolcreatedb OR rolcreaterole OR rolinherit)) AND COALESCE((SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()), false)"
+  check_true "$DB_NAME_PRD" autoshop_migrations_prd migrations-prd \
+    "SELECT current_user = 'autoshop_migrations_prd' AND has_database_privilege(current_user, current_database(), 'CONNECT') AND has_schema_privilege(current_user, 'public', 'CREATE') AND NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = current_user AND (rolsuper OR rolcreatedb OR rolcreaterole OR rolinherit)) AND COALESCE((SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()), false)"
   check_true "$DB_NAME_HML" lambda_auth_hml lambda-hml \
     "SELECT current_user = 'lambda_auth_hml' AND has_column_privilege(current_user, 'public.customers', 'id', 'SELECT') AND has_column_privilege(current_user, 'public.customers', 'status', 'SELECT') AND has_column_privilege(current_user, 'public.customer_documents', 'customer_id', 'SELECT') AND has_column_privilege(current_user, 'public.customer_documents', 'document', 'SELECT') AND NOT has_column_privilege(current_user, 'public.customers', 'email', 'SELECT') AND NOT has_table_privilege(current_user, 'public.customers', 'INSERT') AND NOT has_schema_privilege(current_user, 'public', 'CREATE') AND COALESCE((SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()), false)"
   check_true "$DB_NAME_PRD" lambda_auth_prd lambda-prd \
@@ -69,12 +75,14 @@ elif [[ "$PHASE" == "smoke" ]]; then
       other_database="$DB_NAME_PRD"
       app_role=app_runtime_hml
       lambda_role=lambda_auth_hml
+      migration_role=autoshop_migrations_hml
       suffix=hml
     else
       database="$DB_NAME_PRD"
       other_database="$DB_NAME_HML"
       app_role=app_runtime_prd
       lambda_role=lambda_auth_prd
+      migration_role=autoshop_migrations_prd
       suffix=prd
     fi
     if ! PGUSER="$lambda_role" PGDATABASE="$database" psql -X -w -qAt -v ON_ERROR_STOP=1 \
@@ -87,6 +95,8 @@ elif [[ "$PHASE" == "smoke" ]]; then
     expect_permission_denied "$database" "$lambda_role" "$suffix-lambda-insert" \
       'INSERT INTO public.customers DEFAULT VALUES'
     expect_permission_denied "$other_database" "$app_role" "$suffix-cross-database" \
+      "SELECT current_user"
+    expect_permission_denied "$other_database" "$migration_role" "$suffix-migrations-cross-database" \
       "SELECT current_user"
   done
 else

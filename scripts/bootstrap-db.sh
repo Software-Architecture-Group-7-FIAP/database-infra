@@ -47,6 +47,7 @@ verify_bundle() {
     "$script_dir/bootstrap/job.yaml" \
     "$script_dir/bootstrap/service-account.yaml" \
     "$repo_root/sql/00-bootstrap.sql" \
+    "$repo_root/sql/05-migration-default-privileges.sql" \
     "$repo_root/sql/10-lambda-grants.sql"; do
     [[ -r "$file" ]] || fail 'bootstrap source bundle is incomplete'
   done
@@ -69,8 +70,15 @@ command -v "$jq_bin" >/dev/null 2>&1 || fail 'jq is required'
 command -v "$kubectl_bin" >/dev/null 2>&1 || fail 'kubectl is required'
 
 umask 077
-[[ -d /dev/shm && -w /dev/shm ]] || fail 'tmpfs storage is required for bootstrap temporaries'
-tmp_dir="$(mktemp -d /dev/shm/database-bootstrap.XXXXXX)"
+tmp_base="${BOOTSTRAP_TMP_BASE:-/dev/shm}"
+if [[ "$tmp_base" == /dev/shm ]]; then
+  [[ -d /dev/shm && -w /dev/shm ]] || fail 'tmpfs storage is required for bootstrap temporaries'
+else
+  [[ "${BOOTSTRAP_ALLOW_NON_TMPFS_TMP:-false}" == true && "$tmp_base" == /* && -d "$tmp_base" && -w "$tmp_base" ]] || \
+    fail 'non-tmpfs bootstrap temporaries require an explicit private directory opt-in'
+fi
+# Host-side files include SSM metadata, kubeconfig, rendered manifests, Job status, and command logs. Keep a non-tmpfs base private and operator-controlled; secret payloads and AWS workload credentials stay in the Job's memory-backed /work volume.
+tmp_dir="$(mktemp -d "${tmp_base%/}/database-bootstrap.XXXXXX")"
 chmod 700 "$tmp_dir"
 kubectl_ready=false
 cleanup() {
@@ -96,6 +104,8 @@ required_parameters=(
   /auto-shop/staging/database/secrets/runtime-prd-arn
   /auto-shop/staging/database/secrets/lambda-hml-arn
   /auto-shop/staging/database/secrets/lambda-prd-arn
+  /auto-shop/staging/database/secrets/migrations-hml-arn
+  /auto-shop/staging/database/secrets/migrations-prd-arn
   /auto-shop/staging/database/secrets/owner-arn
   /auto-shop/staging/eks/cluster-name
 )
@@ -112,16 +122,18 @@ if ! capture_ssm_get_parameters_batched \
   fail 'database SSM metadata query failed'
 fi
 if ! "$jq_bin" -e \
-  '(.InvalidParameters | length == 0) and (.Parameters | length == 10) and all(.Parameters[]; .Type == "String")' \
+  '(.InvalidParameters | length == 0) and (.Parameters | length == 12) and all(.Parameters[]; .Type == "String")' \
   "$tmp_dir/parameters.json" >/dev/null 2>&1; then
-  fail 'database SSM metadata contract is incomplete'
+  parameter_count="$("$jq_bin" '.Parameters | length' "$tmp_dir/parameters.json")"
+  invalid_parameters="$("$jq_bin" -r '(.InvalidParameters // []) | join(",")' "$tmp_dir/parameters.json")"
+  non_string_parameters="$("$jq_bin" -r '[.Parameters[]? | select(.Type != "String") | .Name] | join(",")' "$tmp_dir/parameters.json")"
+  fail "database SSM metadata contract is incomplete (received=${parameter_count}; invalid=${invalid_parameters:-none}; non-string=${non_string_parameters:-none})"
 fi
 
 # shellcheck disable=SC2016
 parameter_value() {
-  "$jq_bin" -er --arg name "$1" \
-    '[.Parameters[] | select(.Name == $name) | .Value] | if length == 1 then .[0] else error end' \
-    "$tmp_dir/parameters.json"
+  printf '%s' "$1" | "$jq_bin" -er --slurpfile response "$tmp_dir/parameters.json" -R \
+    '. as $name | [$response[0].Parameters[] | select(.Name == $name) | .Value] | if length == 1 then .[0] else error("expected one SSM parameter match") end'
 }
 
 if ! db_host="$(parameter_value /auto-shop/staging/database/host)" \
@@ -132,6 +144,8 @@ if ! db_host="$(parameter_value /auto-shop/staging/database/host)" \
   || ! runtime_prd_arn="$(parameter_value /auto-shop/staging/database/secrets/runtime-prd-arn)" \
   || ! lambda_hml_arn="$(parameter_value /auto-shop/staging/database/secrets/lambda-hml-arn)" \
   || ! lambda_prd_arn="$(parameter_value /auto-shop/staging/database/secrets/lambda-prd-arn)" \
+  || ! migrations_hml_arn="$(parameter_value /auto-shop/staging/database/secrets/migrations-hml-arn)" \
+  || ! migrations_prd_arn="$(parameter_value /auto-shop/staging/database/secrets/migrations-prd-arn)" \
   || ! owner_secret_arn="$(parameter_value /auto-shop/staging/database/secrets/owner-arn)" \
   || ! cluster_name="$(parameter_value /auto-shop/staging/eks/cluster-name)"; then
   fail 'database SSM metadata could not be parsed'
@@ -145,6 +159,8 @@ fi
 [[ "$runtime_prd_arn" =~ ^arn:aws:secretsmanager:us-east-1:035611741563:secret:auto-shop/staging/prd/app-runtime-[A-Za-z0-9]{6}$ ]] || fail 'prd runtime secret ARN is invalid'
 [[ "$lambda_hml_arn" =~ ^arn:aws:secretsmanager:us-east-1:035611741563:secret:auto-shop/staging/hml/lambda-auth-[A-Za-z0-9]{6}$ ]] || fail 'hml Lambda secret ARN is invalid'
 [[ "$lambda_prd_arn" =~ ^arn:aws:secretsmanager:us-east-1:035611741563:secret:auto-shop/staging/prd/lambda-auth-[A-Za-z0-9]{6}$ ]] || fail 'prd Lambda secret ARN is invalid'
+[[ "$migrations_hml_arn" =~ ^arn:aws:secretsmanager:us-east-1:035611741563:secret:auto-shop/staging/hml/migrations-[A-Za-z0-9]{6}$ ]] || fail 'hml migrations secret ARN is invalid'
+[[ "$migrations_prd_arn" =~ ^arn:aws:secretsmanager:us-east-1:035611741563:secret:auto-shop/staging/prd/migrations-[A-Za-z0-9]{6}$ ]] || fail 'prd migrations secret ARN is invalid'
 [[ "$owner_secret_arn" =~ ^arn:aws:secretsmanager:us-east-1:035611741563:secret:rds\!db-[A-Za-z0-9-]+-[A-Za-z0-9]{6}$ ]] || fail 'RDS owner secret ARN is invalid'
 
 settings_file="$tmp_dir/settings.env"
@@ -154,6 +170,7 @@ settings_file="$tmp_dir/settings.env"
   printf 'OWNER_SECRET_ARN=%s\nRUNTIME_HML_SECRET_ARN=%s\nRUNTIME_PRD_SECRET_ARN=%s\n' \
     "$owner_secret_arn" "$runtime_hml_arn" "$runtime_prd_arn"
   printf 'LAMBDA_HML_SECRET_ARN=%s\nLAMBDA_PRD_SECRET_ARN=%s\n' "$lambda_hml_arn" "$lambda_prd_arn"
+  printf 'MIGRATIONS_HML_SECRET_ARN=%s\nMIGRATIONS_PRD_SECRET_ARN=%s\n' "$migrations_hml_arn" "$migrations_prd_arn"
   printf 'ASM_EXEC_MCP_TIMEOUT=30\nPYTHONDONTWRITEBYTECODE=1\nTMPDIR=/work/tmp\n'
 } >"$settings_file"
 chmod 600 "$settings_file"
@@ -180,6 +197,7 @@ if ! "$kubectl_bin" -n "$NAMESPACE" create configmap "$SQL_CONFIGMAP" \
   --from-file=publish.sh="$script_dir/bootstrap/publish.sh" \
   --from-file=asm-exec="$script_dir/bootstrap/asm-exec" \
   --from-file=00-bootstrap.sql="$repo_root/sql/00-bootstrap.sql" \
+  --from-file=05-migration-default-privileges.sql="$repo_root/sql/05-migration-default-privileges.sql" \
   --from-file=10-lambda-grants.sql="$repo_root/sql/10-lambda-grants.sql" \
   --dry-run=client -o yaml >"$tmp_dir/sql-configmap.yaml" 2>"$tmp_dir/sql-configmap.stderr"; then
   fail 'bootstrap source ConfigMap could not be rendered'
@@ -190,12 +208,19 @@ if ! "$kubectl_bin" -n "$NAMESPACE" create configmap "$SETTINGS_CONFIGMAP" \
   fail 'bootstrap settings ConfigMap could not be rendered'
 fi
 if ! "$kubectl_bin" apply -f "$script_dir/bootstrap/service-account.yaml" \
-  >"$tmp_dir/serviceaccount.stdout" 2>"$tmp_dir/serviceaccount.stderr" \
-  || ! "$kubectl_bin" apply -f "$tmp_dir/sql-configmap.yaml" \
-  >"$tmp_dir/sql-configmap-apply.stdout" 2>"$tmp_dir/sql-configmap-apply.stderr" \
-  || ! "$kubectl_bin" apply -f "$tmp_dir/settings-configmap.yaml" \
+  >"$tmp_dir/serviceaccount.stdout" 2>"$tmp_dir/serviceaccount.stderr"; then
+  IFS= read -r apply_error <"$tmp_dir/serviceaccount.stderr" || true
+  fail "bootstrap ServiceAccount apply failed: ${apply_error:-kubectl returned no diagnostic}"
+fi
+if ! "$kubectl_bin" apply -f "$tmp_dir/sql-configmap.yaml" \
+  >"$tmp_dir/sql-configmap-apply.stdout" 2>"$tmp_dir/sql-configmap-apply.stderr"; then
+  IFS= read -r apply_error <"$tmp_dir/sql-configmap-apply.stderr" || true
+  fail "bootstrap source ConfigMap apply failed: ${apply_error:-kubectl returned no diagnostic}"
+fi
+if ! "$kubectl_bin" apply -f "$tmp_dir/settings-configmap.yaml" \
   >"$tmp_dir/settings-configmap-apply.stdout" 2>"$tmp_dir/settings-configmap-apply.stderr"; then
-  fail 'bootstrap ServiceAccount or ConfigMap could not be applied'
+  IFS= read -r apply_error <"$tmp_dir/settings-configmap-apply.stderr" || true
+  fail "bootstrap settings ConfigMap apply failed: ${apply_error:-kubectl returned no diagnostic}"
 fi
 if ! "$kubectl_bin" apply -f "$script_dir/bootstrap/job.yaml" \
   >"$tmp_dir/job-apply.stdout" 2>"$tmp_dir/job-apply.stderr"; then

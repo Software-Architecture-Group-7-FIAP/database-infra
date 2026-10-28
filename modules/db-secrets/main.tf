@@ -17,3 +17,13 @@ resource "aws_secretsmanager_secret" "lambda" {
   recovery_window_in_days = 0
   tags                    = var.tags
 }
+
+resource "aws_secretsmanager_secret" "migrations" {
+  #checkov:skip=CKV_AWS_149:Staging uses the AWS-managed aws/secretsmanager KMS key and keeps no customer-managed key state.
+  for_each = toset(var.environments)
+
+  name                    = "${var.prefix}/${each.value}/migrations"
+  description             = "Database-scoped migration credential metadata for ${each.value}."
+  recovery_window_in_days = 0
+  tags                    = var.tags
+}

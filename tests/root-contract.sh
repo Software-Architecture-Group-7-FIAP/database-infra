@@ -50,10 +50,13 @@ for parameter in \
   database/secrets/runtime-prd-arn \
   database/secrets/lambda-hml-arn \
   database/secrets/lambda-prd-arn \
+  database/secrets/migrations-hml-arn \
+  database/secrets/migrations-prd-arn \
   database/secrets/owner-arn \
-  database/iam/owner-read-policy-arn \
   database/iam/lambda-read-policy-arn/hml \
-  database/iam/lambda-read-policy-arn/prd; do
+  database/iam/lambda-read-policy-arn/prd \
+  database/iam/migrations-hml-read-policy-arn \
+  database/iam/migrations-prd-read-policy-arn; do
   grep -Fq "\"$parameter\"" "$root/main.tf" || fail "missing published SSM contract key: $parameter"
 done
 

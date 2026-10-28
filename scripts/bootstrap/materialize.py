@@ -21,6 +21,8 @@ SECRET_ENVIRONMENTS = {
     "runtime-prd": ("RUNTIME_PRD_SECRET_JSON", "app_runtime_prd", "autoshop_prd"),
     "lambda-hml": ("LAMBDA_HML_SECRET_JSON", "lambda_auth_hml", "autoshop_hml"),
     "lambda-prd": ("LAMBDA_PRD_SECRET_JSON", "lambda_auth_prd", "autoshop_prd"),
+    "migrations-hml": ("MIGRATIONS_HML_SECRET_JSON", "autoshop_migrations_hml", "autoshop_hml"),
+    "migrations-prd": ("MIGRATIONS_PRD_SECRET_JSON", "autoshop_migrations_prd", "autoshop_prd"),
 }
 
 
@@ -107,24 +109,39 @@ def write_sql_files(phase: str, dbnames: dict[str, str], passwords: dict[str, st
         dbname = dbnames[environment]
         app_role = f"app_runtime_{environment}"
         lambda_role = f"lambda_auth_{environment}"
+        migration_role = f"autoshop_migrations_{environment}"
         if phase == "bootstrap":
             app_key = f"runtime-{environment}"
             lambda_key = f"lambda-{environment}"
+            migration_key = f"migrations-{environment}"
             preamble = (
                 f"\\set dbname {dbname}\n"
                 "\\set owner_role autoshop_owner\n"
                 f"\\set app_role {app_role}\n"
                 f"\\set lambda_role {lambda_role}\n"
+                f"\\set migration_role {migration_role}\n"
                 f"\\set app_password_hash {scram_verifier(passwords[app_key])}\n"
                 f"\\set lambda_password_hash {scram_verifier(passwords[lambda_key])}\n"
+                f"\\set migration_password_hash {scram_verifier(passwords[migration_key])}\n"
             )
             source = (BOOTSTRAP / "00-bootstrap.sql").read_text(encoding="utf-8")
             write_private(WORK / f"bootstrap-{environment}.sql", (preamble + source).encode("utf-8"))
+            defaults_preamble = (
+                f"\\set dbname {dbname}\n"
+                f"\\set app_role {app_role}\n"
+                f"\\set migration_role {migration_role}\n"
+            )
+            defaults_source = (BOOTSTRAP / "05-migration-default-privileges.sql").read_text(encoding="utf-8")
+            write_private(
+                WORK / f"migration-defaults-{environment}.sql",
+                (defaults_preamble + defaults_source).encode("utf-8"),
+            )
         elif phase == "grants":
             preamble = (
                 f"\\set dbname {dbname}\n"
                 f"\\set app_role {app_role}\n"
                 f"\\set lambda_role {lambda_role}\n"
+                f"\\set migration_role {migration_role}\n"
             )
             source = (BOOTSTRAP / "10-lambda-grants.sql").read_text(encoding="utf-8")
             write_private(WORK / f"grants-{environment}.sql", (preamble + source).encode("utf-8"))
@@ -144,7 +161,7 @@ def main() -> None:
 
     pass_entries: list[str] = []
     app_passwords: dict[str, str] = {}
-    if phase in {"bootstrap", "grants"}:
+    if phase == "bootstrap":
         master = parse_secret("MASTER_SECRET_JSON")
         if master is None or master.get("username") != "autoshop_owner":
             raise MaterializationError
@@ -170,6 +187,17 @@ def main() -> None:
             if phase == "bootstrap" and (secret is None or secret != payload):
                 write_private(WORK / f"payload-{key}.json", json_bytes(payload))
             app_passwords[key] = password
+            pass_entries.append(pgpass_line(host, port, "*", username, password))
+
+    if phase == "grants":
+        for environment, dbname in dbnames.items():
+            username = f"autoshop_migrations_{environment}"
+            secret = parse_secret(f"MIGRATIONS_{environment.upper()}_SECRET_JSON")
+            if secret is None or secret.get("username") != username:
+                raise MaterializationError
+            password = secret.get("password")
+            if not isinstance(password, str) or not PASSWORD_PATTERN.fullmatch(password):
+                raise MaterializationError
             pass_entries.append(pgpass_line(host, port, "*", username, password))
 
     write_private(WORK / "pgpass", ("\n".join(pass_entries) + "\n").encode("utf-8"))

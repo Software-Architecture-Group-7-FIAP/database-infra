@@ -3,7 +3,9 @@
 SELECT
   :'dbname' ~ '^autoshop_(hml|prd)$'
   AND :'app_role' = 'app_runtime_' || substring(:'dbname' from '^autoshop_(.*)$')
-  AND :'lambda_role' = 'lambda_auth_' || substring(:'dbname' from '^autoshop_(.*)$') AS inputs_valid
+  AND :'lambda_role' = 'lambda_auth_' || substring(:'dbname' from '^autoshop_(.*)$')
+  AND :'migration_role' = 'autoshop_migrations_' || substring(:'dbname' from '^autoshop_(.*)$')
+  AND current_user = :'migration_role' AS inputs_valid
 \gset
 
 \if :inputs_valid
@@ -17,6 +19,11 @@ $grants_input_contract$;
 \endif
 
 \connect :dbname
+
+REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM :"app_role";
+REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM :"app_role";
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO :"app_role";
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO :"app_role";
 
 REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM :"lambda_role";
 REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM :"lambda_role";

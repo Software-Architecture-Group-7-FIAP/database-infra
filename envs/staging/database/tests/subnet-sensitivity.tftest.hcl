@@ -48,7 +48,7 @@ run "declassifies_validated_ssm_subnet_ids_before_for_each" {
   }
 
   override_data {
-    target = data.aws_iam_policy_document.owner_secret_read
+    target = data.aws_iam_policy_document.migration_hml_secret_read
     values = { json = "{\"Version\":\"2012-10-17\",\"Statement\":[]}" }
   }
 

@@ -12,6 +12,8 @@ SECRET_ENVIRONMENTS = {
     "runtime-prd": ("RUNTIME_PRD_SECRET_ARN", "RUNTIME_PRD_SECRET_JSON"),
     "lambda-hml": ("LAMBDA_HML_SECRET_ARN", "LAMBDA_HML_SECRET_JSON"),
     "lambda-prd": ("LAMBDA_PRD_SECRET_ARN", "LAMBDA_PRD_SECRET_JSON"),
+    "migrations-hml": ("MIGRATIONS_HML_SECRET_ARN", "MIGRATIONS_HML_SECRET_JSON"),
+    "migrations-prd": ("MIGRATIONS_PRD_SECRET_ARN", "MIGRATIONS_PRD_SECRET_JSON"),
 }
 
 
@@ -47,7 +49,7 @@ def main() -> None:
             "TMPDIR": "/work/tmp",
             "PYTHONDONTWRITEBYTECODE": "1",
         })
-        if phase in {"bootstrap", "grants"}:
+        if phase == "bootstrap":
             child_env["MASTER_SECRET_JSON"] = reference(os.environ["OWNER_SECRET_ARN"])
         if phase == "bootstrap":
             for state_key, (arn_key, secret_key_name) in SECRET_ENVIRONMENTS.items():
@@ -58,6 +60,12 @@ def main() -> None:
                     child_env[secret_key_name] = reference(os.environ[arn_key])
         elif phase == "smoke":
             for arn_key, secret_key_name in SECRET_ENVIRONMENTS.values():
+                child_env[secret_key_name] = reference(os.environ[arn_key])
+        elif phase == "grants":
+            for arn_key, secret_key_name in (
+                ("MIGRATIONS_HML_SECRET_ARN", "MIGRATIONS_HML_SECRET_JSON"),
+                ("MIGRATIONS_PRD_SECRET_ARN", "MIGRATIONS_PRD_SECRET_JSON"),
+            ):
                 child_env[secret_key_name] = reference(os.environ[arn_key])
         with (WORK / "asm-exec.stdout").open("wb") as stdout_file, (WORK / "asm-exec.stderr").open("wb") as stderr_file:
             result = subprocess.run(
