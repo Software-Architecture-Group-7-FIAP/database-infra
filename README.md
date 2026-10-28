@@ -15,7 +15,7 @@ Provisiona uma única instância PostgreSQL efêmera para o staging do Auto Shop
 
 - Terraform `>= 1.10.0, < 2.0.0`, provider AWS `~> 6.70` e lock file versionado.
 - PostgreSQL 16.15 em `db.t4g.micro`, Single-AZ, gp3 de 20 GiB, dentro das subnets isoladas do staging.
-- GitHub Actions com OIDC; este repositório não cria nem altera roles de CI, bucket de state ou permissions boundary.
+- GitHub Actions com OIDC; este repositório referencia roles de CI externas e não gerencia suas trust policies, o bucket de state ou a permissions boundary. As trust policies precisam restringir audience, repositório e refs autorizadas na conta AWS.
 - PostgreSQL client e Docker para os testes locais de permissões SQL.
 
 ## Arquitetura
@@ -115,9 +115,9 @@ O bootstrap operacional está implementado localmente. O Job usa AWS CLI para ob
 
 O job SQL instala o cliente PostgreSQL e kcov v42, executa `tests/shell-coverage.sh` e falha se a cobertura de linhas executáveis em `scripts/` ficar abaixo de 80% ou se qualquer um dos 10 ramos críticos de autorização/sanitização não for exercitado. O resultado é publicado no resumo do job do GitHub Actions.
 
-`apply.yml` usa a role existente `AWS_DEPLOY_ROLE_ARN`, exige sessão ativa e autorizada, serializa no grupo `staging-database`, gera um plano salvo, resume e valida o mesmo JSON e aplica somente o arquivo guardado. Depois de `bootstrap`, executa o smoke `initial`; a fase `grants` executa o smoke `full` depois das migrations. `destroy.yml` pede confirmação `destroy` no dispatch e roda como fallback diário às 01:30 UTC; o horário 30 minutos antes do destroy do `k8s-infra` não garante ordenação. Até existir o gate coordenado `session-down`, o operador deve aguardar o destroy do banco e o orphan scan antes de destruir a rede. Se o EKS já tiver sido removido, o destroy usa o state guardado com `-refresh=false`; falhas de acesso continuam bloqueando a operação e não há `terraform state rm` automático.
+`apply.yml` é manual (`workflow_dispatch`) e usa a role existente `AWS_DEPLOY_ROLE_ARN`. Exige sessão ativa e autorizada, serializa no grupo `staging-database`, gera um plano salvo, resume e valida o mesmo JSON e aplica somente o arquivo guardado. Um push ou merge na `main` não inicia provisionamento. Depois de `bootstrap`, executa o smoke `initial`; a fase `grants` executa o smoke `full` depois das migrations. `destroy.yml` pede confirmação `destroy` no dispatch e roda como fallback diário às 01:30 UTC; o horário 30 minutos antes do destroy do `k8s-infra` não garante ordenação. Até existir o gate coordenado `session-down`, o operador deve aguardar o destroy do banco e o orphan scan antes de destruir a rede. Se o EKS já tiver sido removido, o destroy usa o state guardado com `-refresh=false`; falhas de acesso continuam bloqueando a operação e não há `terraform state rm` automático.
 
-Actions de terceiros são fixadas por SHA. PRs não usam `pull_request_target` com privilégios de deploy. A branch protection, a criação do label `breaking-change` e a publicação destes workflows no GitHub são operações externas ainda não realizadas por esta implementação local.
+Actions de terceiros são fixadas por SHA. PRs não usam `pull_request_target` com privilégios de deploy. A `main` exige PR e os quatro checks `staging deployment branch policy`, `Terraform and shell checks`, `PostgreSQL permission integration` e `Read-only staging plan`; aprovação humana é zero, conversas precisam ser resolvidas e force-push/exclusão estão bloqueados. O label `breaking-change` existe. A CI verifica mudanças de nomes contratuais em arquivos Terraform e exige esse label e uma alteração no `CHANGELOG.md` sob `[Unreleased]`.
 
 ## Custo
 
@@ -147,21 +147,20 @@ Backups, restore, requests do Secrets Manager, tráfego/NAT, armazenamento exced
 
 ## Checkov
 
-O scanner fixado no workflow roda sem uma lista global de skips. Nenhuma exceção está configurada porque o Checkov não está instalado localmente; qualquer exceção futura deve corresponder a um achado da versão fixada e ficar limitada ao recurso afetado, com evidência deste ADR e cobertura de regressão.
+O scanner fixado no workflow roda sem uma lista global de skips. Existem dez skips inline, cada um limitado ao recurso afetado: dois `CKV2_AWS_34` para parâmetros `String`/`StringList` sem segredos; um `CKV2_AWS_5` para a referência do SG entre módulos; dois `CKV_AWS_149` para uso da chave AWS gerenciada pelo Secrets Manager; e cinco no RDS (`CKV_AWS_161`, `CKV_AWS_129`, `CKV_AWS_211`, `CKV_AWS_157`, `CKV_AWS_118`) para autenticação SCRAM em vez de IAM, ausência de exportação de query logs, CA G1 com rotação automática, Single-AZ de staging e Enhanced Monitoring desabilitado por custo. O CI validou essas justificativas com Checkov 2.0.930: 54 aprovados, zero falhas e dez skips.
 
 ## Limitações conhecidas
 
 - O bootstrap não está ponta-a-ponta: imagem, digest, disponibilidade de `asm-exec`, comportamento non-root, CA, `verify-full`, retry após falha parcial e canário de logs precisam de validação antes de liberar apply.
 - O Job de migrations owner, sua role/ServiceAccount/association e a montagem de DSN em memória pertencem à integração do `auto-shop-system`; master secret não deve ser sincronizado pelo ESO.
 - O disparo da fase `grants` é manual via input `phase` após Alembic; ainda depende do owner do pipeline consumidor.
-- Pod Identity através da NetworkPolicy strict, wildcard existente do ESO e contrato `session-down` entre este repositório e `k8s-infra` precisam de prova/revisão.
+- Pod Identity através da NetworkPolicy strict e contrato `session-down` entre este repositório e `k8s-infra` precisam de prova/revisão. A policy wildcard atual do External Secrets Operator também precisa ser substituída por leitura do ARN exato de cada segredo `app_runtime`; este repositório ainda não publica uma policy exata para o consumidor da aplicação.
 - O adapter de `lambda-auth` ainda exige `sslmode=require`; deve mudar para `verify-full` com CA e teste antes de demonstrar o fluxo completo.
-- A prova de restore, lock S3 concorrente, sessão de até cinco horas, destruição e custo real não foram executados. ADR e documentação sobre Free/Paid também precisam reconciliação pelo titular.
-- A varredura Checkov fixada no workflow não foi executada localmente porque `checkov` não está instalado; nenhuma exceção de scanner foi presumida.
+- A prova de restore, lock S3 concorrente, sessão de até cinco horas, destruição e custo real ainda não foram executados. O último plan do CI pulou a etapa Terraform porque contratos upstream/EKS não estavam prontos; o apply requer uma sessão autorizada. ADR e documentação sobre Free/Paid também precisam reconciliação pelo titular.
 
 ## Política de compatibilidade
 
-Renomear ou remover qualquer parâmetro SSM ou nome de secret é uma mudança breaking: o PR precisa do label `breaking-change` e uma entrada neste `CHANGELOG.md`. Mudanças aditivas nos três parâmetros `/database/iam/` também devem ser acordadas com os consumidores antes de publicar.
+Renomear ou remover qualquer parâmetro SSM, output público ou nome de secret é uma mudança breaking: o PR precisa do label `breaking-change` e uma entrada neste `CHANGELOG.md` sob `[Unreleased]`. A CI inspeciona diffs nos arquivos Terraform que definem outputs, parâmetros e nomes de segredos; mudanças aditivas no contrato `/database/iam/` também precisam ser acordadas com os consumidores antes de publicar.
 ## Decisões e modelo de dados
 
 A justificativa compartilhada do banco e seu diagrama ER estão no [auto-shop-system](https://github.com/Software-Architecture-Group-7-FIAP/auto-shop-system/blob/develop/docs/architecture/justificativa-banco-postgresql.md).
