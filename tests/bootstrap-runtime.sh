@@ -81,7 +81,7 @@ case "$*" in
     printf 'apiVersion: v1\nkind: ConfigMap\n'
     ;;
   *'apply -f '*)
-    if [[ "${BOOTSTRAP_KUBECTL_MODE:-success}" == fail-apply && "$*" == *'/serviceaccount.yaml'* ]]; then
+    if [[ "${BOOTSTRAP_KUBECTL_MODE:-success}" == fail-apply && "$*" == *'/service-account.yaml'* ]]; then
       exit 1
     fi
     if [[ "${BOOTSTRAP_KUBECTL_MODE:-success}" == fail-sql-configmap-apply && "$*" == *'/sql-configmap.yaml'* ]]; then
