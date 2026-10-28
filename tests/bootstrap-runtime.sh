@@ -156,7 +156,11 @@ expect_bootstrap_failure() {
     bash "$repo_root/scripts/bootstrap-db.sh" bootstrap > "$output" 2>&1; then
     fail "bootstrap unexpectedly accepted $label"
   fi
-  grep -Fq "FAIL: $expected" "$output" || fail "bootstrap did not report the expected $label error"
+  if ! grep -Fq "FAIL: $expected" "$output"; then
+    local observed_failure
+    observed_failure="$(sed -nE 's/^(FAIL: [[:alnum:]_ /-]+).*/\1/p' "$output" | head -n 1 || true)"
+    fail "bootstrap $label returned ${observed_failure:-no sanitized failure}, not the expected error"
+  fi
 }
 
 expect_invalid_parameter() {
