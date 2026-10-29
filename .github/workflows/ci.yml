@@ -64,6 +64,9 @@ jobs:
           terraform_version: ${{ env.TF_VERSION }}
           terraform_wrapper: false
 
+      - name: Test protected database lifecycle validator
+        run: python3 -m unittest discover -s scripts -p 'test_*.py'
+
       - name: terraform fmt
         run: terraform fmt -check -recursive -diff
 
