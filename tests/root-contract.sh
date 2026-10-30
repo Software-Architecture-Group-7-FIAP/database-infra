@@ -69,6 +69,8 @@ if grep -Fq '"database/iam/owner-read-policy-arn"' <<< "$ssm_contract_block"; th
   fail 'legacy database/iam/owner-read-policy-arn must not be published'
 fi
 
+# Backticks are literal Markdown in the expected README text.
+# shellcheck disable=SC2016
 for consumer_contract in \
   'ESO HML: `auto-shop/staging/hml/app-runtime`' \
   'ESO PRD: `auto-shop/staging/prd/app-runtime`' \
