@@ -67,4 +67,8 @@ resource "aws_db_instance" "this" {
   lifecycle {
     prevent_destroy = false
   }
+
+  timeouts {
+    delete = "18m"
+  }
 }

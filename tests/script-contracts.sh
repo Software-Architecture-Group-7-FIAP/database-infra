@@ -39,9 +39,12 @@ assert_secret_value_apis_denied() {
 
 python3 "$repo_root/tests/materialize-contract.py"
 
-for script in plan-summary.sh bootstrap-db.sh smoke.sh orphans.sh ssm-get-parameters.sh; do
+for script in plan-summary.sh bootstrap-db.sh smoke.sh orphans.sh ssm-get-parameters.sh rollback_partial_apply.sh; do
   [[ -f "$repo_root/scripts/$script" ]] || fail "missing operations script: $script"
 done
+[[ -f "$repo_root/scripts/assert_unique_lifecycle_dispatch.py" ]] \
+  || fail 'lifecycle dispatch replay guard is missing'
+python3 "$repo_root/scripts/test_unique_lifecycle_dispatch.py"
 
 if rg -n '^[[:space:]]*ingress([[:space:]]*=|[[:space:]]*\{)' "$repo_root/modules/db-network/main.tf"; then
   fail 'the security group must not own ingress rules inline'
@@ -150,6 +153,9 @@ arguments="$*"
 case "$arguments" in
   *"get-secret-value"*|*"get-parameters-by-path"*|*"GetSecretValue"*|*"GetParametersByPath"*) printf 'prohibited API request\n' >&2; exit 98 ;;
   *"resourcegroupstaggingapi get-resources"*)
+    if [[ -n "${ORPHAN_TEST_SCAN_MARKER:-}" ]]; then
+      touch "$ORPHAN_TEST_SCAN_MARKER"
+    fi
     case "${ORPHAN_TEST_TAG_MODE:-empty}" in
       empty) printf '{"ResourceTagMappingList":[]}\n' ;;
       present) printf '{"ResourceTagMappingList":[{"ResourceARN":"arn:aws:rds:us-east-1:035611741563:db:orphan"}]}\n' ;;
@@ -599,5 +605,132 @@ else
   [[ "$status" -eq 1 ]] || fail "missing jq returned $status instead of a closed failure"
   grep -Fq 'FAIL: jq is required' "$tmp_dir/smoke-missing-jq.out" || fail 'missing jq did not report a clear preflight error'
 fi
+
+mkdir -p "$tmp_dir/rollback-bin"
+cat > "$tmp_dir/rollback-bin/terraform" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "${1:-}" == -chdir=* ]] && shift
+command_name="${1:-}"
+shift || true
+case "$command_name" in
+  init)
+    [[ "${ROLLBACK_TEST_MODE:-}" != init-fail ]] || exit 1
+    ;;
+  state)
+    case "${ROLLBACK_TEST_MODE:-}" in
+      state-missing) printf 'No state file was found\n' >&2; exit 1 ;;
+      state-error) printf 'remote backend unavailable\n' >&2; exit 1 ;;
+      empty-state) exit 0 ;;
+    esac
+    printf 'module.instance.aws_db_instance.this\n'
+    ;;
+  show)
+    if [[ $# -eq 1 ]]; then
+      [[ "${ROLLBACK_TEST_MODE:-}" != state-show-fail ]] || exit 1
+      cat "$ROLLBACK_TEST_STATE_JSON"
+    else
+      [[ "${ROLLBACK_TEST_MODE:-}" != plan-show-fail ]] || exit 1
+      cat "$ROLLBACK_TEST_PLAN_JSON"
+    fi
+    ;;
+  output)
+    [[ "${ROLLBACK_TEST_MODE:-}" != output-fail ]] || exit 1
+    printf '{}\n'
+    ;;
+  plan)
+    [[ "${ROLLBACK_TEST_MODE:-}" != plan-fail ]] || exit 1
+    for argument in "$@"; do
+      [[ "$argument" == -out=* ]] && : > "${argument#-out=}"
+    done
+    ;;
+  apply)
+    touch "$ROLLBACK_TEST_APPLY_CALLED"
+    [[ "${ROLLBACK_TEST_MODE:-}" != apply-fail ]] || exit 1
+    ;;
+  *) printf 'unexpected Terraform command: %s\n' "$command_name" >&2; exit 97 ;;
+esac
+SH
+chmod +x "$tmp_dir/rollback-bin/terraform"
+cat > "$tmp_dir/rollback-state.json" <<'JSON'
+{"values":{"root_module":{"resources":[{"mode":"managed","address":"module.instance.aws_db_instance.this"}]}}}
+JSON
+cat > "$tmp_dir/rollback-plan.json" <<'JSON'
+{"format_version":"1.2","resource_changes":[{"address":"module.instance.aws_db_instance.this","mode":"managed","change":{"actions":["delete"]}}]}
+JSON
+cat > "$tmp_dir/rollback-invalid-plan.json" <<'JSON'
+{"format_version":"1.2","resource_changes":[{"address":"module.instance.aws_db_instance.this","mode":"managed","change":{"actions":["update"]}}]}
+JSON
+
+run_rollback_case() {
+  local mode="$1"
+  local expected="$2"
+  local plan_json="${3:-$tmp_dir/rollback-plan.json}"
+  local status=0
+  rm -f "$tmp_dir/rollback-apply-called"
+  rm -f "$tmp_dir/rollback-orphan-scan-called"
+  if (
+    cd "$repo_root"
+    PATH="$tmp_dir/rollback-bin:$PATH" \
+      ROLLBACK_TEST_MODE="$mode" \
+      ROLLBACK_TEST_STATE_JSON="$tmp_dir/rollback-state.json" \
+      ROLLBACK_TEST_PLAN_JSON="$plan_json" \
+      ROLLBACK_TEST_APPLY_CALLED="$tmp_dir/rollback-apply-called" \
+      ORPHAN_TEST_SCAN_MARKER="$tmp_dir/rollback-orphan-scan-called" \
+      AWS_BIN="$tmp_dir/bin/orphan-aws" \
+      RUNNER_TEMP="$tmp_dir" \
+      GITHUB_STEP_SUMMARY="$tmp_dir/rollback-summary.md" \
+      bash scripts/rollback_partial_apply.sh
+  ) > "$tmp_dir/rollback-$mode.out" 2>&1; then
+    status=0
+  else
+    status=$?
+  fi
+
+  [[ -f "$tmp_dir/rollback-orphan-scan-called" ]] || fail "rollback skipped AWS orphan verification for case $mode"
+
+  case "$mode" in
+    success|output-fail|apply-fail)
+      [[ -f "$tmp_dir/rollback-apply-called" ]] || fail "rollback did not attempt the guarded destroy for case $mode"
+      ;;
+    plan-fail|plan-show-fail|invalid-plan)
+      [[ ! -f "$tmp_dir/rollback-apply-called" ]] || fail "rollback created the terraform apply marker for unvalidated plan case $mode"
+      ;;
+    *)
+      [[ ! -f "$tmp_dir/rollback-apply-called" ]] || fail "rollback applied an unvalidated or unavailable plan for case $mode"
+      ;;
+  esac
+
+  if [[ "$expected" == success ]]; then
+    [[ "$status" -eq 0 ]] || fail "rollback case $mode failed with $status"
+  else
+    [[ "$status" -ne 0 ]] || fail "rollback case $mode unexpectedly succeeded"
+  fi
+}
+
+run_rollback_case success success
+[[ -f "$tmp_dir/rollback-apply-called" ]] || fail 'rollback did not apply its exact guarded plan'
+[[ -f "$tmp_dir/rollback-orphan-scan-called" ]] || fail 'rollback did not verify AWS resources after state cleanup'
+grep -Fq 'Terraform destroy plan deletes exactly the managed resources' "$tmp_dir/rollback-summary.md" || fail 'rollback summary omitted the exact-plan guard result'
+record_critical_branch partial_apply_rollback_uses_exact_saved_destroy_plan
+run_rollback_case state-missing success
+[[ -f "$tmp_dir/rollback-orphan-scan-called" ]] || fail 'rollback treated missing state as success without scanning AWS'
+run_rollback_case empty-state success
+[[ -f "$tmp_dir/rollback-orphan-scan-called" ]] || fail 'rollback treated empty state as success without scanning AWS'
+run_rollback_case output-fail success
+[[ -f "$tmp_dir/rollback-apply-called" ]] || fail 'rollback stopped before destroying managed resources when Terraform outputs were unavailable'
+[[ -f "$tmp_dir/rollback-orphan-scan-called" ]] || fail 'rollback skipped AWS orphan verification when Terraform outputs were unavailable'
+grep -Fq 'Terraform outputs were unavailable; rollback continues with an empty manifest' "$tmp_dir/rollback-summary.md" || fail 'rollback did not record its empty-manifest fallback'
+record_critical_branch partial_apply_rollback_continues_when_outputs_unavailable
+run_rollback_case init-fail failure
+run_rollback_case state-error failure
+run_rollback_case state-show-fail failure
+run_rollback_case plan-fail failure
+run_rollback_case plan-show-fail failure
+run_rollback_case invalid-plan failure "$tmp_dir/rollback-invalid-plan.json"
+run_rollback_case apply-fail failure
+[[ -f "$tmp_dir/rollback-apply-called" ]] || fail 'rollback did not attempt applying its validated plan before reporting failure'
+[[ -f "$tmp_dir/rollback-orphan-scan-called" ]] || fail 'rollback skipped the orphan scan after a failed destroy apply'
+record_critical_branch partial_apply_rollback_verifies_resources_absent_from_state
 
 printf 'PASS: summaries redact plan values and unverified secret resolution fails closed before network access\n'

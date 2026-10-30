@@ -1,17 +1,38 @@
 name: Destroy database staging
+run-name: database/${{ inputs.session_id }}/teardown/destroy:${{ inputs.lifecycle_dispatch_id }}
 
 on:
   workflow_dispatch:
     inputs:
+      session_id:
+        description: Active session identifier, hml-YYYY-MM-DD or prd-YYYY-MM-DD
+        required: true
+        type: string
+      started_at:
+        description: Protected session start time in UTC, YYYY-MM-DDTHH:MM:SSZ
+        required: true
+        type: string
+      session_mode:
+        description: Explicitly authorized HML or PRD session mode
+        required: true
+        type: choice
+        options: [hml, prd-window]
       confirm:
         description: Type destroy to remove the ephemeral database staging session
         required: true
         type: string
-  schedule:
-    - cron: "30 1 * * *"
+      session_token:
+        description: Coordinator-issued HMAC proof for this lifecycle session
+        required: false
+        type: string
+      lifecycle_dispatch_id:
+        description: Unique coordinator dispatch correlation ID
+        required: true
+        type: string
 
 permissions:
   contents: read
+  actions: read
   id-token: write
 
 concurrency:
@@ -25,21 +46,69 @@ env:
 jobs:
   destroy:
     name: destroy ephemeral staging database
-    if: github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || inputs.confirm == 'destroy')
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment: staging
-    timeout-minutes: 60
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        timeout-minutes: 1
         with:
           persist-credentials: false
 
+      - name: Validate the protected session and teardown window before requesting AWS credentials
+        timeout-minutes: 1
+        env:
+          STAGING_ACTIVE: ${{ vars.STAGING_ACTIVE }}
+          STAGING_SESSION_AUTHORIZED: ${{ vars.STAGING_SESSION_AUTHORIZED }}
+          STAGING_SESSION_MODE: ${{ vars.STAGING_SESSION_MODE }}
+          ENVIRONMENT_SCHEDULE_ENABLED: ${{ vars.ENVIRONMENT_SCHEDULE_ENABLED }}
+          PRD_LIFECYCLE_AUTOMATION_READY: ${{ vars.PRD_LIFECYCLE_AUTOMATION_READY }}
+          PRD_COST_EXCEPTION_APPROVED: ${{ vars.PRD_COST_EXCEPTION_APPROVED }}
+          LIFECYCLE_SESSION_SIGNING_KEY: ${{ secrets.LIFECYCLE_SESSION_SIGNING_KEY }}
+          REQUESTED_SESSION_ID: ${{ inputs.session_id }}
+          REQUESTED_STARTED_AT: ${{ inputs.started_at }}
+          REQUESTED_SESSION_MODE: ${{ inputs.session_mode }}
+          REQUESTED_CONFIRMATION: ${{ inputs.confirm }}
+          REQUESTED_SESSION_TOKEN: ${{ inputs.session_token }}
+          REQUESTED_LIFECYCLE_DISPATCH_ID: ${{ inputs.lifecycle_dispatch_id }}
+        run: |
+          set -euo pipefail
+          python3 scripts/validate_database_lifecycle.py \
+            --action teardown \
+            --session-id "$REQUESTED_SESSION_ID" \
+            --started-at "$REQUESTED_STARTED_AT" \
+            --session-mode "$REQUESTED_SESSION_MODE" \
+            --session-token "$REQUESTED_SESSION_TOKEN" \
+            --lifecycle-dispatch-id "$REQUESTED_LIFECYCLE_DISPATCH_ID" \
+            --confirmation "$REQUESTED_CONFIRMATION" \
+            --minimum-remaining-seconds 2100
+
+      - name: Reject replayed lifecycle dispatch IDs before AWS credentials
+        timeout-minutes: 2
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          REQUESTED_STARTED_AT: ${{ inputs.started_at }}
+          REQUESTED_LIFECYCLE_DISPATCH_ID: ${{ inputs.lifecycle_dispatch_id }}
+        run: |
+          set -euo pipefail
+          python3 scripts/assert_unique_lifecycle_dispatch.py \
+            --dispatch-id "$REQUESTED_LIFECYCLE_DISPATCH_ID" \
+            --started-at "$REQUESTED_STARTED_AT" \
+            --current-run-id "$GITHUB_RUN_ID" \
+            --current-run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --repository "$GITHUB_REPOSITORY" \
+            --api-url "${GITHUB_API_URL:-https://api.github.com}" \
+            --token "$GITHUB_TOKEN"
+
       - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        timeout-minutes: 3
         with:
           terraform_version: ${{ env.TF_VERSION }}
           terraform_wrapper: false
 
       - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        timeout-minutes: 2
         with:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           aws-region: us-east-1
@@ -47,6 +116,21 @@ jobs:
 
       - name: Remove bootstrap Kubernetes remnants while the cluster exists
         id: upstream
+        timeout-minutes: 3
+        env:
+          STAGING_ACTIVE: ${{ vars.STAGING_ACTIVE }}
+          STAGING_SESSION_AUTHORIZED: ${{ vars.STAGING_SESSION_AUTHORIZED }}
+          STAGING_SESSION_MODE: ${{ vars.STAGING_SESSION_MODE }}
+          ENVIRONMENT_SCHEDULE_ENABLED: ${{ vars.ENVIRONMENT_SCHEDULE_ENABLED }}
+          PRD_LIFECYCLE_AUTOMATION_READY: ${{ vars.PRD_LIFECYCLE_AUTOMATION_READY }}
+          PRD_COST_EXCEPTION_APPROVED: ${{ vars.PRD_COST_EXCEPTION_APPROVED }}
+          LIFECYCLE_SESSION_SIGNING_KEY: ${{ secrets.LIFECYCLE_SESSION_SIGNING_KEY }}
+          REQUESTED_SESSION_ID: ${{ inputs.session_id }}
+          REQUESTED_STARTED_AT: ${{ inputs.started_at }}
+          REQUESTED_SESSION_MODE: ${{ inputs.session_mode }}
+          REQUESTED_SESSION_TOKEN: ${{ inputs.session_token }}
+          REQUESTED_CONFIRMATION: ${{ inputs.confirm }}
+          REQUESTED_LIFECYCLE_DISPATCH_ID: ${{ inputs.lifecycle_dispatch_id }}
         run: |
           set -euo pipefail
           umask 077
@@ -71,6 +155,14 @@ jobs:
                 echo "::error::Kubeconfig setup failed; Kubernetes cleanup was not verified."
                 exit 1
               fi
+              python3 scripts/validate_database_lifecycle.py \
+                --action teardown \
+                --session-id "$REQUESTED_SESSION_ID" \
+                --started-at "$REQUESTED_STARTED_AT" \
+                --session-mode "$REQUESTED_SESSION_MODE" \
+                --session-token "$REQUESTED_SESSION_TOKEN" \
+                --lifecycle-dispatch-id "$REQUESTED_LIFECYCLE_DISPATCH_ID" \
+                --confirmation "$REQUESTED_CONFIRMATION"
               if ! kubectl -n auto-shop-ops delete job/auto-shop-db-bootstrap configmap/auto-shop-db-bootstrap-sql configmap/auto-shop-db-bootstrap-settings serviceaccount/auto-shop-db-bootstrap --ignore-not-found > "$temp_dir/kubernetes-cleanup.log" 2>&1; then
                 echo "::error::Bootstrap Kubernetes cleanup failed; private diagnostics were discarded."
                 exit 1
@@ -88,8 +180,22 @@ jobs:
           echo "cluster_present=$cluster_present" >> "$GITHUB_OUTPUT"
 
       - name: Destroy Terraform root and verify no owned resources remain
+        timeout-minutes: 23
         env:
           UPSTREAM_CLUSTER_PRESENT: ${{ steps.upstream.outputs.cluster_present }}
+          STAGING_ACTIVE: ${{ vars.STAGING_ACTIVE }}
+          STAGING_SESSION_AUTHORIZED: ${{ vars.STAGING_SESSION_AUTHORIZED }}
+          STAGING_SESSION_MODE: ${{ vars.STAGING_SESSION_MODE }}
+          ENVIRONMENT_SCHEDULE_ENABLED: ${{ vars.ENVIRONMENT_SCHEDULE_ENABLED }}
+          PRD_LIFECYCLE_AUTOMATION_READY: ${{ vars.PRD_LIFECYCLE_AUTOMATION_READY }}
+          PRD_COST_EXCEPTION_APPROVED: ${{ vars.PRD_COST_EXCEPTION_APPROVED }}
+          LIFECYCLE_SESSION_SIGNING_KEY: ${{ secrets.LIFECYCLE_SESSION_SIGNING_KEY }}
+          REQUESTED_SESSION_ID: ${{ inputs.session_id }}
+          REQUESTED_STARTED_AT: ${{ inputs.started_at }}
+          REQUESTED_SESSION_MODE: ${{ inputs.session_mode }}
+          REQUESTED_SESSION_TOKEN: ${{ inputs.session_token }}
+          REQUESTED_CONFIRMATION: ${{ inputs.confirm }}
+          REQUESTED_LIFECYCLE_DISPATCH_ID: ${{ inputs.lifecycle_dispatch_id }}
         run: |
           set -euo pipefail
           umask 077
@@ -121,18 +227,40 @@ jobs:
           fi
           chmod 600 "$temp_dir/manifest.json"
           if [[ "$has_resources" == true ]]; then
-            destroy_args=(destroy -input=false -auto-approve -lock-timeout=300s)
+            if ! terraform -chdir="$stack" show -json > "$temp_dir/state.json" 2> "$temp_dir/state-show.stderr"; then
+              echo "::error::Terraform could not capture the current state privately; no destroy was started."
+              exit 1
+            fi
+            plan_args=(plan -destroy -input=false -lock-timeout=300s -out="$temp_dir/destroy.tfplan")
             if [[ "$UPSTREAM_CLUSTER_PRESENT" == false ]]; then
               # The previous apply stored the non-secret SSM values in state.
               # Use that snapshot only to remove the database stack after its
               # upstream cluster has already been removed.
-              destroy_args+=(-refresh=false)
+              plan_args+=(-refresh=false)
             fi
-            if ! terraform -chdir="$stack" "${destroy_args[@]}" > "$temp_dir/destroy.log" 2>&1; then
-              echo "::error::Terraform destroy failed; private diagnostics were discarded and no automatic state removal was attempted."
+            if ! terraform -chdir="$stack" "${plan_args[@]}" > "$temp_dir/plan.log" 2>&1; then
+              echo "::error::Terraform destroy plan failed; private diagnostics were discarded."
               exit 1
             fi
-            echo "Terraform destroy completed." >> "$GITHUB_STEP_SUMMARY"
+            if ! terraform -chdir="$stack" show -json "$temp_dir/destroy.tfplan" > "$temp_dir/plan.json" 2> "$temp_dir/plan-show.stderr"; then
+              echo "::error::Terraform could not render the saved destroy plan; no destroy was started."
+              exit 1
+            fi
+            python3 scripts/validate_destroy_plan.py "$temp_dir/plan.json" "$temp_dir/state.json" >> "$GITHUB_STEP_SUMMARY"
+            ./scripts/plan-summary.sh "$temp_dir/plan.json" >> "$GITHUB_STEP_SUMMARY"
+            python3 scripts/validate_database_lifecycle.py \
+              --action teardown \
+              --session-id "$REQUESTED_SESSION_ID" \
+              --started-at "$REQUESTED_STARTED_AT" \
+              --session-mode "$REQUESTED_SESSION_MODE" \
+              --session-token "$REQUESTED_SESSION_TOKEN" \
+              --lifecycle-dispatch-id "$REQUESTED_LIFECYCLE_DISPATCH_ID" \
+              --confirmation "$REQUESTED_CONFIRMATION"
+            if ! terraform -chdir="$stack" apply -input=false -auto-approve -lock-timeout=300s "$temp_dir/destroy.tfplan" > "$temp_dir/destroy.log" 2>&1; then
+              echo "::error::Applying the guarded saved destroy plan failed; private diagnostics were discarded and no automatic state removal was attempted."
+              exit 1
+            fi
+            echo "Terraform applied the exact saved destroy plan." >> "$GITHUB_STEP_SUMMARY"
           else
             echo "No Terraform-managed database resources were found; skipping Terraform destroy." >> "$GITHUB_STEP_SUMMARY"
           fi
