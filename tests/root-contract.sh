@@ -43,24 +43,39 @@ for parameter in \
   grep -Fq "$parameter" "$root/main.tf" || fail "missing upstream SSM contract parameter: $parameter"
 done
 
-for parameter in \
-  database/host \
-  database/port \
-  database/security-group-id \
-  database/names/hml \
-  database/names/prd \
-  database/secrets/runtime-hml-arn \
-  database/secrets/runtime-prd-arn \
-  database/secrets/lambda-hml-arn \
-  database/secrets/lambda-prd-arn \
-  database/secrets/migrations-hml-arn \
-  database/secrets/migrations-prd-arn \
-  database/secrets/owner-arn \
-  database/iam/lambda-read-policy-arn/hml \
-  database/iam/lambda-read-policy-arn/prd \
-  database/iam/migrations-hml-read-policy-arn \
-  database/iam/migrations-prd-read-policy-arn; do
-  grep -Fq "\"$parameter\"" "$root/main.tf" || fail "missing published SSM contract key: $parameter"
+expected_ssm_keys=(
+  database/host
+  database/port
+  database/security-group-id
+  database/names/hml
+  database/names/prd
+  database/secrets/runtime-hml-arn
+  database/secrets/runtime-prd-arn
+  database/secrets/lambda-hml-arn
+  database/secrets/lambda-prd-arn
+  database/secrets/migrations-hml-arn
+  database/secrets/migrations-prd-arn
+  database/secrets/owner-arn
+  database/iam/lambda-read-policy-arn/hml
+  database/iam/lambda-read-policy-arn/prd
+  database/iam/migrations-hml-read-policy-arn
+  database/iam/migrations-prd-read-policy-arn
+)
+ssm_contract_block="$(sed -n '/^module "ssm_contract" {/,/^}/p' "$root/main.tf")"
+published_ssm_keys="$(printf '%s\n' "$ssm_contract_block" | rg -o '"database/[^"]+"' | tr -d '"' | sort)"
+expected_ssm_keys_sorted="$(printf '%s\n' "${expected_ssm_keys[@]}" | sort)"
+[[ "$published_ssm_keys" == "$expected_ssm_keys_sorted" ]] || fail 'published SSM contract keys differ from the exact 16-key contract'
+if grep -Fq '"database/iam/owner-read-policy-arn"' <<< "$ssm_contract_block"; then
+  fail 'legacy database/iam/owner-read-policy-arn must not be published'
+fi
+
+for consumer_contract in \
+  'ESO HML: `auto-shop/staging/hml/app-runtime`' \
+  'ESO PRD: `auto-shop/staging/prd/app-runtime`' \
+  'Job de migrations HML do `auto-shop-system`: consome `/auto-shop/staging/database/secrets/migrations-hml-arn` e `/auto-shop/staging/database/iam/migrations-hml-read-policy-arn`; o repositorio possui a role, ServiceAccount e associacao Pod Identity por ambiente.' \
+  'Job de migrations PRD do `auto-shop-system`: consome `/auto-shop/staging/database/secrets/migrations-prd-arn` e `/auto-shop/staging/database/iam/migrations-prd-read-policy-arn`; o repositorio possui a role, ServiceAccount e associacao Pod Identity por ambiente.' \
+  '`k8s-infra` provisiona EKS e namespaces e pode possuir a ServiceAccount de bootstrap do banco; nao possui as identidades de migrations da aplicacao.'; do
+  grep -Fq "$consumer_contract" "$repo_root/README.md" || fail "missing or incorrect downstream consumer mapping: $consumer_contract"
 done
 
 if rg -n -g '!**/tests/**' 'aws_db_proxy|terraform_remote_state|aws_secretsmanager_secret_version|random_password|SecureString' "$repo_root/envs" "$repo_root/modules"; then

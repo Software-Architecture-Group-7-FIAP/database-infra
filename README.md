@@ -61,17 +61,25 @@ Todos os parâmetros publicados são `String`, tier Standard, na região `us-eas
 | `/auto-shop/staging/database/security-group-id` | ID do SG do RDS | `lambda-auth` para validar rede |
 | `/auto-shop/staging/database/names/hml` | `autoshop_hml` | configuração do app e Lambda hml |
 | `/auto-shop/staging/database/names/prd` | `autoshop_prd` | configuração do app e Lambda prd |
-| `/auto-shop/staging/database/secrets/runtime-hml-arn` | ARN `app-runtime` hml | ExternalSecret do `auto-shop-system` |
-| `/auto-shop/staging/database/secrets/runtime-prd-arn` | ARN `app-runtime` prd | ExternalSecret do `auto-shop-system` |
-| `/auto-shop/staging/database/secrets/lambda-hml-arn` | ARN `lambda-auth` hml | função `lambda-auth` hml |
-| `/auto-shop/staging/database/secrets/lambda-prd-arn` | ARN `lambda-auth` prd | função `lambda-auth` prd |
-| `/auto-shop/staging/database/secrets/migrations-hml-arn` | ARN da credencial DDL dedicada a `autoshop_hml` | Job de migrations HML |
-| `/auto-shop/staging/database/secrets/migrations-prd-arn` | ARN da credencial DDL dedicada a `autoshop_prd` | Job de migrations PRD |
+| `/auto-shop/staging/database/secrets/runtime-hml-arn` | ARN `app-runtime` hml | metadado; o ESO usa o nome estavel `auto-shop/staging/hml/app-runtime` no Secrets Manager, nao este ARN SSM |
+| `/auto-shop/staging/database/secrets/runtime-prd-arn` | ARN `app-runtime` prd | metadado; o ESO usa o nome estavel `auto-shop/staging/prd/app-runtime` no Secrets Manager, nao este ARN SSM |
+| `/auto-shop/staging/database/secrets/lambda-hml-arn` | ARN `lambda-auth` hml | metadado; `lambda-auth` usa o ID `auto-shop/staging/hml/lambda-auth` no Secrets Manager |
+| `/auto-shop/staging/database/secrets/lambda-prd-arn` | ARN `lambda-auth` prd | metadado; `lambda-auth` usa o ID `auto-shop/staging/prd/lambda-auth` no Secrets Manager |
+| `/auto-shop/staging/database/secrets/migrations-hml-arn` | ARN da credencial DDL dedicada a `autoshop_hml` | Job HML do `auto-shop-system` consome este ARN SSM de credencial por ambiente |
+| `/auto-shop/staging/database/secrets/migrations-prd-arn` | ARN da credencial DDL dedicada a `autoshop_prd` | Job PRD do `auto-shop-system` consome este ARN SSM de credencial por ambiente |
 | `/auto-shop/staging/database/secrets/owner-arn` | ARN do master secret gerenciado pelo RDS | somente o Job de bootstrap deste repositório |
 | `/auto-shop/staging/database/iam/lambda-read-policy-arn/hml` | ARN da policy de leitura Lambda hml | role da função `lambda-auth` hml |
 | `/auto-shop/staging/database/iam/lambda-read-policy-arn/prd` | ARN da policy de leitura Lambda prd | role da função `lambda-auth` prd |
-| `/auto-shop/staging/database/iam/migrations-hml-read-policy-arn` | policy de leitura do secret migrations HML | role Pod Identity de migrations HML |
-| `/auto-shop/staging/database/iam/migrations-prd-read-policy-arn` | policy de leitura do secret migrations PRD | role Pod Identity de migrations PRD |
+| `/auto-shop/staging/database/iam/migrations-hml-read-policy-arn` | policy de leitura do secret migrations HML | role Pod Identity de migrations HML do `auto-shop-system` anexa esta policy |
+| `/auto-shop/staging/database/iam/migrations-prd-read-policy-arn` | policy de leitura do secret migrations PRD | role Pod Identity de migrations PRD do `auto-shop-system` anexa esta policy |
+
+Mapeamento atual dos consumidores:
+
+- ESO HML: `auto-shop/staging/hml/app-runtime` no Secrets Manager; nao consome o ARN runtime HML do SSM.
+- ESO PRD: `auto-shop/staging/prd/app-runtime` no Secrets Manager; nao consome o ARN runtime PRD do SSM.
+- Job de migrations HML do `auto-shop-system`: consome `/auto-shop/staging/database/secrets/migrations-hml-arn` e `/auto-shop/staging/database/iam/migrations-hml-read-policy-arn`; o repositorio possui a role, ServiceAccount e associacao Pod Identity por ambiente.
+- Job de migrations PRD do `auto-shop-system`: consome `/auto-shop/staging/database/secrets/migrations-prd-arn` e `/auto-shop/staging/database/iam/migrations-prd-read-policy-arn`; o repositorio possui a role, ServiceAccount e associacao Pod Identity por ambiente.
+- `k8s-infra` provisiona EKS e namespaces e pode possuir a ServiceAccount de bootstrap do banco; nao possui as identidades de migrations da aplicacao.
 
 Os quatro parâmetros `/iam/` publicam ARNs de policies, nunca valores de credenciais. Cada policy de migrations permite ler apenas o secret do respectivo banco. O root não usa `terraform_remote_state`, `GetParametersByPath`, `SecureString` ou um nome singular `database/name`.
 
