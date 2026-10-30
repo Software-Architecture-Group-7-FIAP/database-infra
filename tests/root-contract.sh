@@ -62,6 +62,7 @@ expected_ssm_keys=(
   database/iam/migrations-prd-read-policy-arn
 )
 ssm_contract_block="$(sed -n '/^module "ssm_contract" {/,/^}/p' "$root/main.tf")"
+grep -Fq 'prefix = "/auto-shop/staging"' <<< "$ssm_contract_block" || fail 'published SSM contract prefix must be /auto-shop/staging'
 published_ssm_keys="$(printf '%s\n' "$ssm_contract_block" | rg -o '"database/[^"]+"' | tr -d '"' | sort)"
 expected_ssm_keys_sorted="$(printf '%s\n' "${expected_ssm_keys[@]}" | sort)"
 [[ "$published_ssm_keys" == "$expected_ssm_keys_sorted" ]] || fail 'published SSM contract keys differ from the exact 16-key contract'
