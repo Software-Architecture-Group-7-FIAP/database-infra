@@ -150,7 +150,9 @@ aws_json automated_snapshots rds describe-db-snapshots --db-instance-identifier 
 assert_no_items 'automated RDS snapshots' '(.DBSnapshots | length == 0)' automated_snapshots
 
 aws_json_automated_backups
-assert_no_items 'automated RDS backups' '(.DBInstanceAutomatedBackups | length == 0)' automated_backups
+assert_no_items 'automated RDS backups' \
+  '(.DBInstanceAutomatedBackups | if type == "array" then length == 0 else false end)' \
+  automated_backups
 
 assert_named_resource_absent 'RDS subnet group' subnet_group rds describe-db-subnet-groups --db-subnet-group-name auto-shop-staging-db
 assert_named_resource_absent 'RDS parameter group' parameter_group rds describe-db-parameter-groups --db-parameter-group-name auto-shop-staging-postgres16

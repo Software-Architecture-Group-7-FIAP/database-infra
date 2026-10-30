@@ -124,6 +124,7 @@ critical_branches=(
   smoke_full_runtime_job_preflight
   smoke_partial_metadata_failure
   automated_backup_not_found_is_absent
+  automated_backup_response_shape_fails_closed
   automated_backup_query_error_closed
   secret_absent_metadata
   secret_pending_then_absent

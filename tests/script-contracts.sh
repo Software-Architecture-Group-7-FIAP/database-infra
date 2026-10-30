@@ -171,6 +171,8 @@ case "$arguments" in
   *"rds describe-db-instance-automated-backups"*)
     case "${ORPHAN_TEST_AUTOMATED_BACKUP_MODE:-empty}" in
       empty) printf '{"DBInstanceAutomatedBackups":[]}\n' ;;
+      missing) printf '{}\n' ;;
+      null) printf '{"DBInstanceAutomatedBackups":null}\n' ;;
       not-found)
         printf 'An error occurred (DBInstanceAutomatedBackupNotFound) when calling the DescribeDBInstanceAutomatedBackups operation: No automated backup for this DB instance was found.\n' >&2
         exit 255
@@ -318,6 +320,23 @@ if grep -Fq 'CANARY_SECRET_VALUE' "$tmp_dir/orphans-backup-not-found.out"; then
   fail 'the no-automated-backup check leaked a canary value'
 fi
 record_critical_branch automated_backup_not_found_is_absent
+
+for malformed_mode in missing null; do
+  if ORPHAN_TEST_AUTOMATED_BACKUP_MODE="$malformed_mode" \
+    ORCHESTRATION_TEST_SSM_BATCH_LOG="$tmp_dir/orphans-backup-$malformed_mode-batches.log" \
+    AWS_BIN="$tmp_dir/bin/orphan-aws" \
+    bash "$repo_root/scripts/orphans.sh" "$tmp_dir/manifest.json" \
+    > "$tmp_dir/orphans-backup-$malformed_mode.out" 2>&1; then
+    fail "the orphan scan accepted a malformed automated-backup response ($malformed_mode)"
+  else
+    status=$?
+    [[ "$status" -eq 1 ]] || fail "malformed automated-backup response ($malformed_mode) returned $status instead of a closed failure"
+    grep -Fq 'FAIL: orphan detected or ownership query incomplete: automated RDS backups' \
+      "$tmp_dir/orphans-backup-$malformed_mode.out" \
+      || fail "the orphan scan did not fail closed on a malformed automated-backup response ($malformed_mode)"
+  fi
+done
+record_critical_branch automated_backup_response_shape_fails_closed
 
 if ORPHAN_TEST_AUTOMATED_BACKUP_MODE=query-error \
   ORCHESTRATION_TEST_SSM_BATCH_LOG="$tmp_dir/orphans-backup-query-error-batches.log" \
