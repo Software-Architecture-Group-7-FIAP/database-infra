@@ -80,8 +80,8 @@ destroy_replay_line="$(grep -nF 'name: Reject replayed lifecycle dispatch IDs be
 destroy_credentials_line="$(grep -nF 'uses: aws-actions/configure-aws-credentials@' "$workflows/destroy.yml" | cut -d: -f1)"
 [[ -n "$destroy_replay_line" && -n "$destroy_credentials_line" && "$destroy_replay_line" -lt "$destroy_credentials_line" ]] \
   || fail 'destroy replay validation must run before AWS credentials are requested'
-grep -Fq 'timeout-minutes: 50' "$workflows/destroy.yml" || fail 'destroy job must leave time for the bounded RDS teardown and verification step'
-grep -Fq 'timeout-minutes: 35' "$workflows/destroy.yml" || fail 'Terraform teardown step must cover RDS deletion and orphan verification'
+grep -A8 -F '  destroy:' "$workflows/destroy.yml" | grep -Fq 'timeout-minutes: 35' || fail 'destroy job must fit inside the 35-minute lifecycle budget'
+grep -A2 -F 'name: Destroy Terraform root and verify no owned resources remain' "$workflows/destroy.yml" | grep -Fq 'timeout-minutes: 23' || fail 'Terraform teardown step must be bounded inside the lifecycle deadline'
 grep -Fq -- '--minimum-remaining-seconds 2100' "$workflows/destroy.yml" || fail 'destroy must require its full runtime budget before any AWS read'
 grep -Fq 'delete = "18m"' "$repo_root/modules/db-instance/main.tf" || fail 'RDS deletion timeout must fit inside the bounded Terraform teardown step'
 grep -Fq '22:40 BRT' "$repo_root/scripts/validate_database_lifecycle.py" || fail 'database teardown must stop before the audit window'
