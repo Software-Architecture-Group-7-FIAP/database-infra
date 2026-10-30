@@ -65,6 +65,20 @@ aws_json() {
   fi
 }
 
+aws_json_automated_backups() {
+  if ! "$aws_bin" --region "$region" rds describe-db-instance-automated-backups \
+    --db-instance-identifier auto-shop-staging --output json \
+    > "$tmp_dir/automated_backups.json" 2> "$tmp_dir/automated_backups.stderr"; then
+    # RDS uses this documented 404 to indicate that no automated backup exists.
+    if grep -Eq '[(]DBInstanceAutomatedBackupNotFound(Fault)?[)]' \
+      "$tmp_dir/automated_backups.stderr"; then
+      printf '{"DBInstanceAutomatedBackups":[]}\n' > "$tmp_dir/automated_backups.json"
+      return
+    fi
+    fail 'automated_backups metadata query failed'
+  fi
+}
+
 assert_no_items() {
   local label="$1"
   local expression="$2"
@@ -135,7 +149,7 @@ assert_no_items 'manual RDS snapshots' '(.DBSnapshots | length == 0)' manual_sna
 aws_json automated_snapshots rds describe-db-snapshots --db-instance-identifier auto-shop-staging --snapshot-type automated
 assert_no_items 'automated RDS snapshots' '(.DBSnapshots | length == 0)' automated_snapshots
 
-aws_json automated_backups rds describe-db-instance-automated-backups --db-instance-identifier auto-shop-staging
+aws_json_automated_backups
 assert_no_items 'automated RDS backups' '(.DBInstanceAutomatedBackups | length == 0)' automated_backups
 
 assert_named_resource_absent 'RDS subnet group' subnet_group rds describe-db-subnet-groups --db-subnet-group-name auto-shop-staging-db

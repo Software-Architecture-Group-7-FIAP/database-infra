@@ -168,7 +168,20 @@ case "$arguments" in
     ;;
   *"rds describe-db-instances"*) printf 'DBInstanceNotFound: no such staging instance\n' >&2; exit 255 ;;
   *"rds describe-db-snapshots"*) printf '{"DBSnapshots":[]}\n' ;;
-  *"rds describe-db-instance-automated-backups"*) printf '{"DBInstanceAutomatedBackups":[]}\n' ;;
+  *"rds describe-db-instance-automated-backups"*)
+    case "${ORPHAN_TEST_AUTOMATED_BACKUP_MODE:-empty}" in
+      empty) printf '{"DBInstanceAutomatedBackups":[]}\n' ;;
+      not-found)
+        printf 'An error occurred (DBInstanceAutomatedBackupNotFound) when calling the DescribeDBInstanceAutomatedBackups operation: No automated backup for this DB instance was found.\n' >&2
+        exit 255
+        ;;
+      query-error)
+        printf 'An error occurred (AccessDenied) when calling the DescribeDBInstanceAutomatedBackups operation: synthetic backup detail\n' >&2
+        exit 255
+        ;;
+      *) printf 'unexpected automated backup mode\n' >&2; exit 97 ;;
+    esac
+    ;;
   *"rds describe-db-subnet-groups"*) printf 'DBSubnetGroupNotFoundFault: no such subnet group\n' >&2; exit 255 ;;
   *"rds describe-db-parameter-groups"*) printf 'DBParameterGroupNotFound: no such parameter group\n' >&2; exit 255 ;;
   *"ec2 describe-security-groups"*) printf 'InvalidGroup.NotFound: no such security group\n' >&2; exit 255 ;;
@@ -289,6 +302,38 @@ cmp -s "$tmp_dir/expected-orphan-ssm-batches.log" "$tmp_dir/orphans-batches.log"
 if grep -Fq 'CANARY_SECRET_VALUE' "$tmp_dir/orphans.out"; then
   fail 'orphan scan leaked a canary value'
 fi
+
+if ORPHAN_TEST_AUTOMATED_BACKUP_MODE=not-found \
+  ORCHESTRATION_TEST_SSM_BATCH_LOG="$tmp_dir/orphans-backup-not-found-batches.log" \
+  AWS_BIN="$tmp_dir/bin/orphan-aws" \
+  bash "$repo_root/scripts/orphans.sh" "$tmp_dir/manifest.json" > "$tmp_dir/orphans-backup-not-found.out" 2>&1; then
+  grep -Fq 'PASS: automated RDS backups absent' "$tmp_dir/orphans-backup-not-found.out" \
+    || fail 'the documented no-automated-backup response was not treated as absence'
+  grep -Fq 'PASS: database-infra orphan scan completed' "$tmp_dir/orphans-backup-not-found.out" \
+    || fail 'the orphan scan did not complete after automated backups were absent'
+else
+  fail 'the orphan scan rejected the documented no-automated-backup response'
+fi
+if grep -Fq 'CANARY_SECRET_VALUE' "$tmp_dir/orphans-backup-not-found.out"; then
+  fail 'the no-automated-backup check leaked a canary value'
+fi
+record_critical_branch automated_backup_not_found_is_absent
+
+if ORPHAN_TEST_AUTOMATED_BACKUP_MODE=query-error \
+  ORCHESTRATION_TEST_SSM_BATCH_LOG="$tmp_dir/orphans-backup-query-error-batches.log" \
+  AWS_BIN="$tmp_dir/bin/orphan-aws" \
+  bash "$repo_root/scripts/orphans.sh" "$tmp_dir/manifest.json" > "$tmp_dir/orphans-backup-query-error.out" 2>&1; then
+  fail 'the orphan scan accepted an automated-backup metadata query failure'
+else
+  status=$?
+  [[ "$status" -eq 1 ]] || fail "automated-backup metadata failure returned $status instead of a closed failure"
+  grep -Fq 'FAIL: automated_backups metadata query failed' "$tmp_dir/orphans-backup-query-error.out" \
+    || fail 'the orphan scan did not fail closed on an automated-backup query error'
+  if grep -Fq 'synthetic backup detail' "$tmp_dir/orphans-backup-query-error.out"; then
+    fail 'the orphan scan exposed raw automated-backup diagnostics'
+  fi
+fi
+record_critical_branch automated_backup_query_error_closed
 
 if ORPHAN_TEST_LEGACY_POLICY_MODE=present \
   ORCHESTRATION_TEST_SSM_BATCH_LOG="$tmp_dir/orphans-legacy-policy-batches.log" \
