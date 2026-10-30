@@ -20,6 +20,8 @@ fi
 grep -Fq 'branches: [main]' "$workflows/ci.yml" || fail 'CI must run for pull requests to main'
 grep -Fq 'environment-policy:' "$workflows/ci.yml" || fail 'CI must assert the staging deployment branch policy'
 grep -Fq 'id-token: write' "$workflows/ci.yml" || fail 'read-only plan job must use OIDC'
+grep -Fq 'environment: aws-plan' "$workflows/ci.yml" || fail 'read-only plan job must use the aws-plan environment'
+grep -Fq "github.event_name == 'push' && github.ref == 'refs/heads/main'" "$workflows/ci.yml" || fail 'read-only plan must run only on push to main'
 grep -Fq './scripts/plan-guard.sh' "$workflows/ci.yml" || fail 'CI plan must use the plan guard'
 grep -Fq 'services:' "$workflows/ci.yml" || fail 'SQL CI must use an ephemeral PostgreSQL service'
 grep -Fq 'postgres:16-alpine' "$workflows/ci.yml" || fail 'SQL CI must pin PostgreSQL 16 Alpine'
