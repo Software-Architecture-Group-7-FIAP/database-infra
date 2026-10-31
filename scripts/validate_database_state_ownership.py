@@ -32,6 +32,8 @@ def _environment_requirements(environment: str) -> set[str]:
 
 
 def _environment_owned_addresses(environment: str) -> set[str]:
+    # Keep the former bootstrap-role SSM binding allowlisted until a guarded
+    # apply removes it from migrated state; it is no longer part of the contract.
     return _environment_requirements(environment) | {
         f'module.secrets.aws_secretsmanager_secret.migrations["{environment}"]',
         f'aws_iam_policy.migration_{environment}_secret_read',

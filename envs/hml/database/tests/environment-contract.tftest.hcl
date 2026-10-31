@@ -119,7 +119,6 @@ run "hml_root_owns_only_hml_database_metadata" {
       "/auto-shop/staging/database/secrets/migrations-hml-arn",
       "/auto-shop/staging/database/iam/migrations-hml-read-policy-arn",
       "/auto-shop/staging/database/iam/lambda-read-policy-arn/hml",
-      "/auto-shop/staging/database/iam/bootstrap-role-arn/hml",
     ])
     error_message = "The HML root must publish only HML-specific database metadata to SSM."
   }

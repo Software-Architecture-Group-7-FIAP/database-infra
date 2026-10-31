@@ -12,14 +12,14 @@ The HML and PRD roots do not own RDS, network resources, the legacy staging role
 
 ## Bootstrap identity handoff to k8s-infra
 
-`database-infra` owns the per-environment IAM role, its exact secret policy and attachment, and the non-secret role ARN SSM parameter. `k8s-infra` owns the ServiceAccount and EKS Pod Identity association. It must use the same environment-specific pair:
+`database-infra` owns the per-environment IAM role, its exact secret policy and attachment. The role ARN is a Terraform output and is derived by the bootstrap runner from the fixed account and environment role-name contract; it is not published to SSM. `k8s-infra` owns the ServiceAccount and EKS Pod Identity association. It must use the same environment-specific pair:
 
-| Environment | IAM role | SSM role ARN | K8s namespace/ServiceAccount |
-|---|---|---|---|
-| HML | `auto-shop-staging-db-bootstrap-hml` | `/auto-shop/staging/database/iam/bootstrap-role-arn/hml` | `auto-shop-ops/auto-shop-db-bootstrap-hml` |
-| PRD | `auto-shop-staging-db-bootstrap-prd` | `/auto-shop/staging/database/iam/bootstrap-role-arn/prd` | `auto-shop-ops/auto-shop-db-bootstrap-prd` |
+| Environment | IAM role | K8s namespace/ServiceAccount |
+|---|---|---|
+| HML | `auto-shop-staging-db-bootstrap-hml` | `auto-shop-ops/auto-shop-db-bootstrap-hml` |
+| PRD | `auto-shop-staging-db-bootstrap-prd` | `auto-shop-ops/auto-shop-db-bootstrap-prd` |
 
-The database workflow creates the selected IAM role and publishes its ARN. The selected K8s association must exist before bootstrap runs. `scripts/bootstrap-db.sh` renders the matching ServiceAccount name into a temporary Job manifest, requires that ServiceAccount to exist, and verifies that AWS credentials belong to the selected role before resolving or publishing credentials. It does not create or delete ServiceAccount objects.
+The database workflow creates the selected IAM role. The selected K8s association must exist before bootstrap runs. `scripts/bootstrap-db.sh` renders the matching ServiceAccount name into a temporary Job manifest, requires that ServiceAccount to exist, and verifies that AWS credentials belong to the selected role before resolving or publishing credentials. It does not create or delete ServiceAccount objects.
 
 For teardown, first remove the selected bootstrap Job and ConfigMaps, then have `k8s-infra` remove the matching Pod Identity association and ServiceAccount. The database destroy flow verifies the association is absent before destroying the selected IAM role. The post-destroy scanner checks the selected role, association, secrets, policies, and SSM metadata are absent while shared RDS remains available.
 

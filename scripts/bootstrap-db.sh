@@ -119,7 +119,6 @@ required_parameters=(
   "/auto-shop/staging/database/secrets/runtime-$environment-arn"
   "/auto-shop/staging/database/secrets/lambda-$environment-arn"
   "/auto-shop/staging/database/secrets/migrations-$environment-arn"
-  "/auto-shop/staging/database/iam/bootstrap-role-arn/$environment"
   /auto-shop/staging/database/secrets/owner-arn
   /auto-shop/staging/eks/cluster-name
 )
@@ -136,7 +135,7 @@ if ! capture_ssm_get_parameters_batched \
   fail 'database SSM metadata query failed'
 fi
 if ! "$jq_bin" -e \
-  '(.InvalidParameters | length == 0) and (.Parameters | length == 9) and all(.Parameters[]; .Type == "String")' \
+  '(.InvalidParameters | length == 0) and (.Parameters | length == 8) and all(.Parameters[]; .Type == "String")' \
   "$tmp_dir/parameters.json" >/dev/null 2>&1; then
   parameter_count="$("$jq_bin" '.Parameters | length' "$tmp_dir/parameters.json")"
   invalid_parameters="$("$jq_bin" -r '(.InvalidParameters // []) | join(",")' "$tmp_dir/parameters.json")"
@@ -156,7 +155,6 @@ if ! db_host="$(parameter_value /auto-shop/staging/database/host)" \
   || ! runtime_arn="$(parameter_value "/auto-shop/staging/database/secrets/runtime-$environment-arn")" \
   || ! lambda_arn="$(parameter_value "/auto-shop/staging/database/secrets/lambda-$environment-arn")" \
   || ! migrations_arn="$(parameter_value "/auto-shop/staging/database/secrets/migrations-$environment-arn")" \
-  || ! bootstrap_role_arn="$(parameter_value "/auto-shop/staging/database/iam/bootstrap-role-arn/$environment")" \
   || ! owner_secret_arn="$(parameter_value /auto-shop/staging/database/secrets/owner-arn)" \
   || ! cluster_name="$(parameter_value /auto-shop/staging/eks/cluster-name)"; then
   fail 'database SSM metadata could not be parsed'
@@ -171,7 +169,7 @@ fi
 [[ "$migrations_arn" =~ ^arn:aws:secretsmanager:us-east-1:035611741563:secret:auto-shop/staging/$environment/migrations-[A-Za-z0-9]{6}$ ]] || fail 'selected migrations secret ARN is invalid'
 [[ "$owner_secret_arn" =~ ^arn:aws:secretsmanager:us-east-1:035611741563:secret:rds\!db-[A-Za-z0-9-]+-[A-Za-z0-9]{6}$ ]] || fail 'RDS owner secret ARN is invalid'
 expected_role_arn="arn:aws:iam::$ACCOUNT_ID:role/auto-shop/auto-shop-staging-db-bootstrap-$environment"
-[[ "$bootstrap_role_arn" == "$expected_role_arn" ]] || fail 'bootstrap role ARN does not match the selected environment contract'
+bootstrap_role_arn="$expected_role_arn"
 
 settings_file="$tmp_dir/settings.env"
 {

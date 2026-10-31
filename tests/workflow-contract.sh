@@ -70,12 +70,14 @@ grep -Fq 'DATABASE_INFRA_STATE_HANDOFF_COMPLETE' "$workflows/apply.yml" || fail 
 grep -Fq 'DATABASE_INFRA_DEPLOYMENT_READY' "$workflows/apply.yml" || fail 'apply must remain blocked until the deployment role and OIDC trust are reviewed'
 grep -Fq 'scripts/validate_database_state_ownership.py' "$workflows/apply.yml" || fail 'apply must verify shared/HML/PRD state ownership before planning'
 grep -Fq -- '--environment hml' "$workflows/apply.yml" || fail 'HML apply must require its transferred environment bindings in the isolated state'
-grep -Fq 'environment_root="envs/$TARGET_ENVIRONMENT/database"' "$workflows/apply.yml" || fail 'bootstrap and grants must apply only the selected environment root'
+grep -Fq 'environment_root="envs/$TARGET_ENVIRONMENT/database"' "$workflows/apply.yml" || fail 'HML provision, bootstrap, and grants must target only the selected environment root'
 grep -A5 -F '      session_mode:' "$workflows/apply.yml" | grep -Fq 'options: [hml]' || fail 'database apply must expose HML as its sole selectable mode'
 if grep -Fq 'prd-window' "$workflows/apply.yml"; then
   fail 'PRD database apply must remain disabled during the HML spend-cap window'
 fi
 grep -Fq 'TARGET_ENVIRONMENT: hml' "$workflows/apply.yml" || fail 'database apply must target only HML'
+grep -A5 -F '      phase:' "$workflows/apply.yml" | grep -Fq 'options: [provision, bootstrap, grants]' \
+  || fail 'HML infrastructure provisioning, credential bootstrap, and grants must be explicit phases'
 if rg -n '^[[:space:]]+deploy:|id-token: write|aws-actions/configure-aws-credentials@|terraform[^\n]*(plan|apply|destroy|state list)' "$workflows/database-delivery.yml"; then
   fail 'branch delivery must never assume AWS credentials, access state, plan, or apply'
 fi
@@ -101,23 +103,42 @@ grep -Fq './scripts/bootstrap-db.sh "$PHASE" "$TARGET_ENVIRONMENT"' "$workflows/
 grep -Fq './scripts/smoke.sh initial "$TARGET_ENVIRONMENT"' "$workflows/apply.yml" || fail 'initial smoke must validate only the selected environment'
 grep -Fq './scripts/smoke.sh full "$TARGET_ENVIRONMENT"' "$workflows/apply.yml" || fail 'full smoke must validate only the selected environment'
 grep -Fq 'auto-shop-db-bootstrap-{{ENVIRONMENT}}' "$repo_root/scripts/bootstrap/job.yaml" || fail 'bootstrap Job must use an environment-specific Kubernetes service account'
-grep -Fq 'database/iam/bootstrap-role-arn/$environment' "$repo_root/scripts/bootstrap-db.sh" || fail 'bootstrap must load the selected environment role ARN from SSM'
+grep -Fq 'expected_role_arn="arn:aws:iam::$ACCOUNT_ID:role/auto-shop/auto-shop-staging-db-bootstrap-$environment"' "$repo_root/scripts/bootstrap-db.sh" \
+  || fail 'bootstrap must derive the selected environment role ARN from the fixed account/name contract'
+if grep -Fq 'bootstrap-role-arn' "$repo_root/scripts/bootstrap-db.sh"; then
+  fail 'bootstrap-role ARNs must not be read from the SSM output contract'
+fi
 if rg -n 'apply -f .*service-account.yaml|delete .*serviceaccount/auto-shop-db-bootstrap-' "$repo_root/scripts/bootstrap-db.sh"; then
   fail 'database bootstrap must leave ServiceAccount and Pod Identity ownership in k8s-infra'
 fi
 grep -Fq 'Automatic partial rollback of the shared HML/PRD RDS root is disabled' "$repo_root/scripts/rollback_partial_apply.sh" || fail 'partial rollback must retain the shared RDS for operator review'
-grep -Fq 'Preserve database state after an unsafe bootstrap rollback' "$workflows/apply.yml" || fail 'failed bootstrap must report that shared database state is retained'
+grep -Fq 'Preserve database state after failed provisioning or bootstrap' "$workflows/apply.yml" || fail 'failed provisioning or bootstrap must retain database state for review'
+grep -Fq "inputs.phase == 'bootstrap' || steps.database_apply.outputs.apply_started == 'true'" "$workflows/apply.yml" \
+  || fail 'failed bootstrap must preserve existing database state even though that phase does not run Terraform'
 grep -Fq 'Preserve database state after a grants-phase failure' "$workflows/apply.yml" || fail 'failed grants must retain database state for operator review'
 if rg -n 'terraform[[:space:]]+(plan|apply|destroy)|validate_destroy_plan\.py|orphans\.sh' "$repo_root/scripts/rollback_partial_apply.sh"; then
   fail 'partial-apply rollback must not destroy or mutate the shared database state'
 fi
-apply_line="$(grep -nF 'Terraform apply completed from the guarded saved plan.' "$workflows/apply.yml" | cut -d: -f1)"
-# The contract checks literal shell syntax, so parameter expansion is not intended here.
-# shellcheck disable=SC2016
-bootstrap_line="$(grep -nF './scripts/bootstrap-db.sh "$PHASE"' "$workflows/apply.yml" | cut -d: -f1)"
-if sed -n "$((apply_line + 1)),$((bootstrap_line - 1))p" "$workflows/apply.yml" | grep -Fq -- '--action start'; then
-  fail 'an authorized apply must finish its bootstrap phase after the start window closes'
-fi
+python3 - "$workflows/apply.yml" <<'PY'
+from pathlib import Path
+import sys
+
+workflow = Path(sys.argv[1]).read_text(encoding="utf-8")
+step = workflow.split(
+    "      - name: Apply guarded database roots or run the requested credential phase", 1
+)[1].split("      - name: Roll back managed resources after a failed or interrupted database apply", 1)[0]
+if 'if [[ "$PHASE" == "provision" ]]; then' not in step or "exit 0" not in step:
+    raise SystemExit("FAIL: provisioning must end before the separate credential phase")
+provision = step.split('if [[ "$PHASE" == "provision" ]]; then', 1)[1].split("exit 0", 1)[0]
+credentials = step.split("exit 0", 1)[1]
+guard = "python3 scripts/validate_database_lifecycle.py"
+apply = 'terraform -chdir="$stack" apply'
+bootstrap = './scripts/bootstrap-db.sh "$PHASE" "$TARGET_ENVIRONMENT"'
+if guard not in provision or apply not in provision or provision.index(guard) > provision.index(apply):
+    raise SystemExit("FAIL: database provisioning must revalidate the session before Terraform apply")
+if guard not in credentials or bootstrap not in credentials or credentials.index(guard) > credentials.index(bootstrap):
+    raise SystemExit("FAIL: database credentials must revalidate the session before bootstrap")
+PY
 
 if rg -n '^[[:space:]]+schedule:' "$workflows/destroy.yml"; then
   fail 'database teardown must be dispatched by the coordinated lifecycle workflow, not an independent schedule'

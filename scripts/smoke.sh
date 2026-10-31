@@ -74,7 +74,7 @@ required_output_parameters=(
   "/auto-shop/staging/database/secrets/migrations-$environment-arn"
   "/auto-shop/staging/database/iam/lambda-read-policy-arn/$environment"
   "/auto-shop/staging/database/iam/migrations-$environment-read-policy-arn"
-  "/auto-shop/staging/database/iam/bootstrap-role-arn/$environment"
+  /auto-shop/staging/database/secrets/owner-arn
 )
 
 if ! capture_ssm_get_parameters_batched \
@@ -82,7 +82,7 @@ if ! capture_ssm_get_parameters_batched \
   "${required_output_parameters[@]}"; then
   fail 'SSM parameter metadata query failed'
 fi
-assert_json 'SSM contract contains exactly the approved plain String parameters' \
+assert_json 'shared and selected-environment SSM contract contains 10 approved plain String parameters' \
   '(.InvalidParameters | length == 0) and (.Parameters | length == 10) and all(.Parameters[]; .Type == "String" and (.Name | startswith("/auto-shop/staging/database/"))) and all(.Parameters[]; (.Value | test("postgres(ql)?://|password[[:space:]_]*[:=]|database_url|connection_string|dsn[[:space:]_]*[:=]"; "i") | not))' \
   parameters
 

@@ -566,16 +566,15 @@ cat > "$tmp_dir/smoke-fixtures/parameters.json" <<'JSON'
     {"Name":"/auto-shop/staging/database/names/prd","Type":"String","Value":"autoshop_prd"},
     {"Name":"/auto-shop/staging/database/secrets/runtime-hml-arn","Type":"String","Value":"arn:aws:secretsmanager:us-east-1:035611741563:secret:auto-shop/staging/hml/app-runtime"},
     {"Name":"/auto-shop/staging/database/secrets/runtime-prd-arn","Type":"String","Value":"arn:aws:secretsmanager:us-east-1:035611741563:secret:auto-shop/staging/prd/app-runtime"},
+    {"Name":"/auto-shop/staging/database/secrets/owner-arn","Type":"String","Value":"arn:aws:secretsmanager:us-east-1:035611741563:secret:rds!db-test-abc123"},
     {"Name":"/auto-shop/staging/database/secrets/lambda-hml-arn","Type":"String","Value":"arn:aws:secretsmanager:us-east-1:035611741563:secret:auto-shop/staging/hml/lambda-auth"},
     {"Name":"/auto-shop/staging/database/secrets/lambda-prd-arn","Type":"String","Value":"arn:aws:secretsmanager:us-east-1:035611741563:secret:auto-shop/staging/prd/lambda-auth"},
     {"Name":"/auto-shop/staging/database/secrets/migrations-hml-arn","Type":"String","Value":"arn:aws:secretsmanager:us-east-1:035611741563:secret:auto-shop/staging/hml/migrations"},
     {"Name":"/auto-shop/staging/database/secrets/migrations-prd-arn","Type":"String","Value":"arn:aws:secretsmanager:us-east-1:035611741563:secret:auto-shop/staging/prd/migrations"},
     {"Name":"/auto-shop/staging/database/iam/lambda-read-policy-arn/hml","Type":"String","Value":"arn:aws:iam::035611741563:policy/auto-shop/auto-shop-staging-db-read-lambda-hml"},
     {"Name":"/auto-shop/staging/database/iam/migrations-hml-read-policy-arn","Type":"String","Value":"arn:aws:iam::035611741563:policy/auto-shop/auto-shop-staging-db-read-migrations-hml"},
-    {"Name":"/auto-shop/staging/database/iam/bootstrap-role-arn/hml","Type":"String","Value":"arn:aws:iam::035611741563:role/auto-shop/auto-shop-staging-db-bootstrap-hml"},
     {"Name":"/auto-shop/staging/database/iam/lambda-read-policy-arn/prd","Type":"String","Value":"arn:aws:iam::035611741563:policy/auto-shop/auto-shop-staging-db-read-lambda-prd"},
-    {"Name":"/auto-shop/staging/database/iam/migrations-prd-read-policy-arn","Type":"String","Value":"arn:aws:iam::035611741563:policy/auto-shop/auto-shop-staging-db-read-migrations-prd"},
-    {"Name":"/auto-shop/staging/database/iam/bootstrap-role-arn/prd","Type":"String","Value":"arn:aws:iam::035611741563:role/auto-shop/auto-shop-staging-db-bootstrap-prd"}
+    {"Name":"/auto-shop/staging/database/iam/migrations-prd-read-policy-arn","Type":"String","Value":"arn:aws:iam::035611741563:policy/auto-shop/auto-shop-staging-db-read-migrations-prd"}
   ]
 }
 JSON

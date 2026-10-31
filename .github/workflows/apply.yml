@@ -18,10 +18,10 @@ on:
         type: choice
         options: [hml]
       phase:
-        description: Bootstrap credentials before migrations, or apply the Lambda grants after migrations
+        description: Provision the HML contract, bootstrap credentials, or apply Lambda grants after migrations
         required: true
         type: choice
-        options: [bootstrap, grants]
+        options: [provision, bootstrap, grants]
       lifecycle_dispatch_id:
         description: Unique coordinator dispatch correlation ID
         required: true
@@ -229,7 +229,7 @@ jobs:
             exit 1
           fi
 
-      - name: Apply one guarded saved plan and run the requested phase
+      - name: Apply guarded database roots or run the requested credential phase
         id: database_apply
         timeout-minutes: 28
         env:
@@ -245,32 +245,77 @@ jobs:
         run: |
           set -euo pipefail
           umask 077
-          stack="envs/staging/database"
           temp_dir="$(mktemp -d "$RUNNER_TEMP/database-apply.XXXXXX")"
           chmod 700 "$temp_dir"
           trap 'rm -rf "$temp_dir"' EXIT
-          if ! terraform -chdir="$stack" init -input=false -lock-timeout=300s > "$temp_dir/init.log" 2>&1; then
-            echo "::error::Terraform init failed; private diagnostics were discarded."
-            exit 1
+          if [[ "$PHASE" == "provision" ]]; then
+            stack="envs/staging/database"
+            if ! terraform -chdir="$stack" init -input=false -lock-timeout=300s > "$temp_dir/init.log" 2>&1; then
+              echo "::error::Terraform init failed; private diagnostics were discarded."
+              exit 1
+            fi
+            # The staging root owns the shared RDS. A failed HML/PRD session must
+            # never trigger automatic cleanup of that shared database.
+            rollback_safe=false
+            echo "rollback_safe=$rollback_safe" >> "$GITHUB_OUTPUT"
+            if ! terraform -chdir="$stack" plan -input=false -lock-timeout=300s -out="$temp_dir/plan.tfplan" > "$temp_dir/plan.log" 2>&1; then
+              echo "::error::Terraform plan failed; private diagnostics were discarded."
+              exit 1
+            fi
+            if ! terraform -chdir="$stack" show -json "$temp_dir/plan.tfplan" > "$temp_dir/plan.json" 2> "$temp_dir/show.stderr"; then
+              echo "::error::Terraform could not produce the guarded plan JSON."
+              exit 1
+            fi
+            if jq -e 'any((.resource_changes // [])[]; ((.change.actions // []) | index("delete")) != null)' "$temp_dir/plan.json" > /dev/null; then
+              echo "::error::The shared staging plan contains a deletion or replacement; no change was applied."
+              exit 1
+            fi
+            ./scripts/plan-summary.sh "$temp_dir/plan.json" >> "$GITHUB_STEP_SUMMARY"
+            ./scripts/plan-guard.sh "$temp_dir/plan.json" >> "$GITHUB_STEP_SUMMARY"
+            python3 scripts/validate_database_lifecycle.py \
+              --action start \
+              --session-id "$REQUESTED_SESSION_ID" \
+              --started-at "$REQUESTED_STARTED_AT" \
+              --session-mode "$REQUESTED_SESSION_MODE" \
+              --lifecycle-dispatch-id "$REQUESTED_LIFECYCLE_DISPATCH_ID" \
+              --phase "$PHASE"
+            echo "apply_started=true" >> "$GITHUB_OUTPUT"
+            if ! terraform -chdir="$stack" apply -input=false -auto-approve -lock-timeout=300s "$temp_dir/plan.tfplan" > "$temp_dir/apply.log" 2>&1; then
+              echo "::error::Terraform apply failed; private diagnostics were discarded."
+              exit 1
+            fi
+            echo "Terraform apply completed from the guarded saved plan." >> "$GITHUB_STEP_SUMMARY"
+
+            environment_root="envs/$TARGET_ENVIRONMENT/database"
+            root_temp_dir="$temp_dir/$TARGET_ENVIRONMENT"
+            mkdir -m 700 "$root_temp_dir"
+            if ! terraform -chdir="$environment_root" init -input=false -lock-timeout=300s > "$root_temp_dir/init.log" 2>&1; then
+              echo "::error::Terraform init failed for ${environment_root}; private diagnostics were discarded."
+              exit 1
+            fi
+            if ! terraform -chdir="$environment_root" plan -input=false -lock-timeout=300s -out="$root_temp_dir/plan.tfplan" > "$root_temp_dir/plan.log" 2>&1; then
+              echo "::error::Terraform plan failed for ${environment_root}; private diagnostics were discarded."
+              exit 1
+            fi
+            if ! terraform -chdir="$environment_root" show -json "$root_temp_dir/plan.tfplan" > "$root_temp_dir/plan.json" 2> "$root_temp_dir/show.stderr"; then
+              echo "::error::Terraform could not render the ${environment_root} plan."
+              exit 1
+            fi
+            if jq -e 'any((.resource_changes // [])[]; ((.change.actions // []) | index("delete")) != null)' "$root_temp_dir/plan.json" > /dev/null; then
+              echo "::error::The ${environment_root} plan contains a deletion or replacement; no change was applied."
+              exit 1
+            fi
+            ./scripts/plan-summary.sh "$root_temp_dir/plan.json" >> "$GITHUB_STEP_SUMMARY"
+            ./scripts/plan-guard.sh "$root_temp_dir/plan.json" >> "$GITHUB_STEP_SUMMARY"
+            if ! terraform -chdir="$environment_root" apply -input=false -auto-approve -lock-timeout=300s "$root_temp_dir/plan.tfplan" > "$root_temp_dir/apply.log" 2>&1; then
+              echo "::error::Terraform apply failed for ${environment_root}; private diagnostics were discarded."
+              exit 1
+            fi
+            echo "Terraform applied the guarded ${environment_root} plan." >> "$GITHUB_STEP_SUMMARY"
+            echo "Database infrastructure provisioned. Run the HML k8s identity apply before the bootstrap phase." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
           fi
-          # The staging root owns the shared RDS. A failed HML/PRD session must
-          # never trigger automatic cleanup of that shared database.
-          rollback_safe=false
-          echo "rollback_safe=$rollback_safe" >> "$GITHUB_OUTPUT"
-          if ! terraform -chdir="$stack" plan -input=false -lock-timeout=300s -out="$temp_dir/plan.tfplan" > "$temp_dir/plan.log" 2>&1; then
-            echo "::error::Terraform plan failed; private diagnostics were discarded."
-            exit 1
-          fi
-          if ! terraform -chdir="$stack" show -json "$temp_dir/plan.tfplan" > "$temp_dir/plan.json" 2> "$temp_dir/show.stderr"; then
-            echo "::error::Terraform could not produce the guarded plan JSON."
-            exit 1
-          fi
-          if jq -e 'any((.resource_changes // [])[]; ((.change.actions // []) | index("delete")) != null)' "$temp_dir/plan.json" > /dev/null; then
-            echo "::error::The shared staging plan contains a deletion or replacement; no change was applied."
-            exit 1
-          fi
-          ./scripts/plan-summary.sh "$temp_dir/plan.json" >> "$GITHUB_STEP_SUMMARY"
-          ./scripts/plan-guard.sh "$temp_dir/plan.json" >> "$GITHUB_STEP_SUMMARY"
+
           python3 scripts/validate_database_lifecycle.py \
             --action start \
             --session-id "$REQUESTED_SESSION_ID" \
@@ -278,41 +323,7 @@ jobs:
             --session-mode "$REQUESTED_SESSION_MODE" \
             --lifecycle-dispatch-id "$REQUESTED_LIFECYCLE_DISPATCH_ID" \
             --phase "$PHASE"
-          echo "apply_started=true" >> "$GITHUB_OUTPUT"
-          if ! terraform -chdir="$stack" apply -input=false -auto-approve -lock-timeout=300s "$temp_dir/plan.tfplan" > "$temp_dir/apply.log" 2>&1; then
-            echo "::error::Terraform apply failed; private diagnostics were discarded."
-            exit 1
-          fi
-          echo "Terraform apply completed from the guarded saved plan." >> "$GITHUB_STEP_SUMMARY"
-
-          environment_root="envs/$TARGET_ENVIRONMENT/database"
-          root_temp_dir="$temp_dir/$TARGET_ENVIRONMENT"
-          mkdir -m 700 "$root_temp_dir"
-          if ! terraform -chdir="$environment_root" init -input=false -lock-timeout=300s > "$root_temp_dir/init.log" 2>&1; then
-            echo "::error::Terraform init failed for ${environment_root}; private diagnostics were discarded."
-            exit 1
-          fi
-          if ! terraform -chdir="$environment_root" plan -input=false -lock-timeout=300s -out="$root_temp_dir/plan.tfplan" > "$root_temp_dir/plan.log" 2>&1; then
-            echo "::error::Terraform plan failed for ${environment_root}; private diagnostics were discarded."
-            exit 1
-          fi
-          if ! terraform -chdir="$environment_root" show -json "$root_temp_dir/plan.tfplan" > "$root_temp_dir/plan.json" 2> "$root_temp_dir/show.stderr"; then
-            echo "::error::Terraform could not render the ${environment_root} plan."
-            exit 1
-          fi
-          if jq -e 'any((.resource_changes // [])[]; ((.change.actions // []) | index("delete")) != null)' "$root_temp_dir/plan.json" > /dev/null; then
-            echo "::error::The ${environment_root} plan contains a deletion or replacement; no change was applied."
-            exit 1
-          fi
-          ./scripts/plan-summary.sh "$root_temp_dir/plan.json" >> "$GITHUB_STEP_SUMMARY"
-          ./scripts/plan-guard.sh "$root_temp_dir/plan.json" >> "$GITHUB_STEP_SUMMARY"
-          if ! terraform -chdir="$environment_root" apply -input=false -auto-approve -lock-timeout=300s "$root_temp_dir/plan.tfplan" > "$root_temp_dir/apply.log" 2>&1; then
-            echo "::error::Terraform apply failed for ${environment_root}; private diagnostics were discarded."
-            exit 1
-          fi
-          echo "Terraform applied the guarded ${environment_root} plan." >> "$GITHUB_STEP_SUMMARY"
-
-          echo "The session authorization was checked immediately before apply; this accepted apply and its bootstrap phase may finish after the start window closes." >> "$GITHUB_STEP_SUMMARY"
+          echo "The session authorization was checked immediately before the credential phase." >> "$GITHUB_STEP_SUMMARY"
           ./scripts/bootstrap-db.sh "$PHASE" "$TARGET_ENVIRONMENT"
           if [[ "$PHASE" == "bootstrap" ]]; then
             ./scripts/smoke.sh initial "$TARGET_ENVIRONMENT" | tee -a "$GITHUB_STEP_SUMMARY"
@@ -332,11 +343,11 @@ jobs:
           DATABASE_PARTIAL_ROLLBACK_SAFE: ${{ steps.database_apply.outputs.rollback_safe }}
         run: bash scripts/rollback_partial_apply.sh
 
-      - name: Preserve database state after an unsafe bootstrap rollback
+      - name: Preserve database state after failed provisioning or bootstrap
         if: >-
           always() &&
-          inputs.phase == 'bootstrap' &&
-          steps.database_apply.outputs.apply_started == 'true' &&
+          (inputs.phase == 'provision' || inputs.phase == 'bootstrap') &&
+          (inputs.phase == 'bootstrap' || steps.database_apply.outputs.apply_started == 'true') &&
           steps.database_apply.outcome != 'success' &&
           steps.database_apply.outputs.rollback_safe != 'true'
         timeout-minutes: 1

@@ -46,7 +46,7 @@ The following remain owned only by `database-infra/staging/terraform.tfstate`:
 - `aws_iam_role.db_bootstrap`, `aws_iam_role_policy.db_bootstrap`, and `aws_eks_pod_identity_association.db_bootstrap` (the retained legacy role can read only the shared RDS owner secret).
 - Common SSM parameters for `database/host`, `database/port`, `database/security-group-id`, and `database/secrets/owner-arn`.
 
-All shared RDS, network, legacy role, and legacy Pod Identity addresses remain in staging. Neither environment state may contain any shared binding. `k8s-infra` owns per-environment ServiceAccounts and Pod Identity associations; the database roots own only the selected bootstrap IAM roles, policies/attachments, and role ARN SSM parameters. Their exact matching names are documented in [database delivery](database-delivery.md).
+All shared RDS, network, legacy role, and legacy Pod Identity addresses remain in staging. Neither environment state may contain any shared binding. `k8s-infra` owns per-environment ServiceAccounts and Pod Identity associations; the database roots own only the selected bootstrap IAM roles, policies/attachments, and environment-specific SSM metadata; bootstrap role ARNs are derived from the fixed account/name contract and are not SSM parameters. Their exact matching names are documented in [database delivery](database-delivery.md).
 
 ## Controlled handoff procedure
 
@@ -58,4 +58,4 @@ All shared RDS, network, legacy role, and legacy Pod Identity addresses remain i
 6. If any step fails or ownership is ambiguous, stop before Terraform plan/apply and restore/reconcile only from the protected state copies under operator review. Do not clear state or remove bindings automatically.
 7. After an independent review confirms the inventories and state object versions, an authorized repository administrator may set `DATABASE_INFRA_STATE_HANDOFF_COMPLETE=true`. Keep `DATABASE_INFRA_DEPLOYMENT_READY` false until the separate deployment-role/OIDC readiness review is complete.
 
-After the gate is opened, the first environment plans may add only new migration and bootstrap metadata/policy/role resources absent from the original state. Review those plans; any deletion or replacement remains blocked by the workflows. Before bootstrap runs, `k8s-infra` must provision the selected ServiceAccount and Pod Identity association using the selected environment's SSM role ARN.
+After the gate is opened, the first environment plans may add only new migration and bootstrap metadata/policy/role resources absent from the original state. Review those plans; any deletion or replacement remains blocked by the workflows. Before bootstrap runs, `k8s-infra` must provision the selected ServiceAccount and Pod Identity association using the selected environment's fixed IAM role-name contract; the ARN is derived locally and is not published to SSM.

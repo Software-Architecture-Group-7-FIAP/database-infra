@@ -143,7 +143,6 @@ module "ssm_contract" {
     "database/secrets/migrations-prd-arn"         = module.secrets.migration_secret_arns[local.environment]
     "database/iam/migrations-prd-read-policy-arn" = aws_iam_policy.migration_prd_secret_read.arn
     "database/iam/lambda-read-policy-arn/prd"     = aws_iam_policy.lambda_prd_secret_read.arn
-    "database/iam/bootstrap-role-arn/prd"         = aws_iam_role.environment_bootstrap.arn
   }
   tags = local.tags
 }

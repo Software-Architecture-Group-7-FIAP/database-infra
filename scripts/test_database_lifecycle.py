@@ -73,6 +73,22 @@ class DatabaseLifecycleValidationTests(unittest.TestCase):
         )
         self.validate(
             session_mode="hml",
+            action="start",
+            phase="provision",
+            session_id="hml-2026-11-01",
+            started_at="2026-11-01T20:00:00Z",
+            now=utc_timestamp(2026, 11, 1, 17, 30),
+        )
+        self.validate(
+            session_mode="hml",
+            action="start",
+            phase="bootstrap",
+            session_id="hml-2026-11-01",
+            started_at="2026-11-01T20:00:00Z",
+            now=utc_timestamp(2026, 11, 1, 18, 0),
+        )
+        self.validate(
+            session_mode="hml",
             action="teardown",
             phase="",
             session_id=session_id,
@@ -84,7 +100,7 @@ class DatabaseLifecycleValidationTests(unittest.TestCase):
     def test_rejects_prd_database_apply_during_the_hml_cap_window(self) -> None:
         start = "2026-11-01T09:00:00Z"
         session_id = "prd-2026-11-01"
-        for phase in ("bootstrap", "grants"):
+        for phase in ("provision", "bootstrap", "grants"):
             with self.subTest(phase=phase):
                 with self.assertRaisesRegex(LifecycleWindowError, "PRD database apply is disabled"):
                     self.validate(
