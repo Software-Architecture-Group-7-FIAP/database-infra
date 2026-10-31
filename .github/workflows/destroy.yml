@@ -224,12 +224,15 @@ jobs:
                 --lifecycle-dispatch-id "$REQUESTED_LIFECYCLE_DISPATCH_ID" \
                 --confirmation "$REQUESTED_CONFIRMATION"
               bootstrap_service_account="auto-shop-db-bootstrap-$REQUESTED_ENVIRONMENT"
-              if ! kubectl -n auto-shop-ops delete \
+              if ! kubectl --request-timeout=30s \
+                -n auto-shop-ops delete \
                 "job/auto-shop-db-bootstrap-$REQUESTED_ENVIRONMENT" \
                 "configmap/auto-shop-db-bootstrap-sql-$REQUESTED_ENVIRONMENT" \
                 "configmap/auto-shop-db-bootstrap-settings-$REQUESTED_ENVIRONMENT" \
                 --ignore-not-found > "$temp_dir/kubernetes-cleanup.log" 2>&1; then
-                echo "::error::Bootstrap Kubernetes cleanup failed; private diagnostics were discarded."
+                python3 scripts/classify_kubernetes_cleanup_failure.py \
+                  "$temp_dir/kubernetes-cleanup.log" >> "$GITHUB_STEP_SUMMARY" || true
+                echo "::error::Bootstrap Kubernetes cleanup failed; Terraform destroy remains blocked."
                 exit 1
               fi
               if ! aws eks list-pod-identity-associations \
