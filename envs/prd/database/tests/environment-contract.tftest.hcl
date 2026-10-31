@@ -119,7 +119,6 @@ run "prd_root_owns_only_prd_database_metadata" {
       "/auto-shop/staging/database/secrets/migrations-prd-arn",
       "/auto-shop/staging/database/iam/migrations-prd-read-policy-arn",
       "/auto-shop/staging/database/iam/lambda-read-policy-arn/prd",
-      "/auto-shop/staging/database/iam/bootstrap-role-arn/prd",
     ])
     error_message = "The PRD root must publish only PRD-specific database metadata to SSM."
   }

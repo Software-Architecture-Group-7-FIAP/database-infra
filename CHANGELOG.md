@@ -4,6 +4,7 @@ All notable changes to this repository are recorded here.
 
 ## [Unreleased]
 
+- **Breaking:** constrain the database SSM contract to the approved 16 names; remove the undocumented bootstrap-role ARN parameters and derive those ARNs from the fixed account and environment role-name contract.
 - **Breaking:** split `envs/hml/database` and `envs/prd/database` into their own Terraform roots and states (`database-infra/hml/terraform.tfstate`, `database-infra/prd/terraform.tfstate`), each owning only its environment's secret metadata, read policies, and bootstrap role. The shared `envs/staging/database` root no longer declares the `db-secrets` module directly; it keeps sole ownership of the RDS instance, network, and bootstrap role, and reads the existing per-environment secrets via data source.
 - Require manual dispatch for staging apply and enforce the breaking database contract label/changelog policy in CI.
 - Add the single ephemeral staging PostgreSQL root, network, secret metadata, IAM and SSM contract from ADR-0071 rev. 2026-10-25.

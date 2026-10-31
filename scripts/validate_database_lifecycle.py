@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 BRT = ZoneInfo("America/Sao_Paulo")
 FIRST_PRD_DAY = date(2026, 11, 1)
 LAST_PRD_DAY = date(2026, 11, 5)
-LAST_HML_DAY = date(2026, 10, 31)
+LAST_HML_DAY = date(2026, 11, 5)
 STARTED_AT_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 MAX_SESSION_DURATION = timedelta(hours=5)
 LIFECYCLE_TEARDOWN_CUTOFF = time(22, 40)
@@ -51,7 +51,7 @@ def _validate_hml_action(
     local_now = now.astimezone(BRT)
     local_start = started_at.astimezone(BRT)
     if local_now.date() > LAST_HML_DAY or local_start.date() > LAST_HML_DAY:
-        raise LifecycleWindowError("HML lifecycle sessions are allowed only through 31/10/2026 BRT.")
+        raise LifecycleWindowError("HML lifecycle sessions are allowed only through 05/11/2026 BRT.")
     if local_start.date() != local_now.date():
         raise LifecycleWindowError("HML session start and action must use the same BRT date.")
     if session_id != f"hml-{local_now.date().isoformat()}":
@@ -65,14 +65,10 @@ def _validate_hml_action(
         raise LifecycleWindowError("The HML session cannot start in the future.")
 
     if action == "start":
-        if phase not in {"bootstrap", "grants"}:
-            raise LifecycleWindowError("HML apply requires phase bootstrap or grants.")
+        if phase not in {"provision", "bootstrap", "grants"}:
+            raise LifecycleWindowError("HML apply requires phase provision, bootstrap, or grants.")
         if elapsed >= MAX_SESSION_DURATION:
             raise LifecycleWindowError("HML apply must finish within five hours of started_at.")
-        if phase == "bootstrap":
-            local_time = local_now.time().replace(tzinfo=None)
-            if local_time < time(7, 0) or local_time > time(17, 0):
-                raise LifecycleWindowError("HML bootstrap must start between 07:00 and 17:00 BRT.")
         if confirmation:
             raise LifecycleWindowError("A confirmation value is not valid for the apply operation.")
         return

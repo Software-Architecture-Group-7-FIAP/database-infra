@@ -56,6 +56,8 @@ def _approved_resources(environment: str) -> dict[str, tuple[str, dict[str, str]
             },
         ),
     }
+    # Legacy bootstrap-role SSM bindings remain destroyable while old state is
+    # migrated; new plans must not create them.
     ssm_names = (
         f"database/names/{environment}",
         f"database/secrets/runtime-{environment}-arn",

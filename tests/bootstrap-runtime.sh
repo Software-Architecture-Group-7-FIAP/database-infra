@@ -17,6 +17,7 @@ export BOOTSTRAP_SSM_FIXTURE="$tmp_dir/parameters.json"
 export BOOTSTRAP_AWS_CALLS="$tmp_dir/aws-calls.log"
 export BOOTSTRAP_AWS_BATCH_COUNT="$tmp_dir/aws-batch-count"
 export BOOTSTRAP_KUBECTL_CALLS="$tmp_dir/kubectl-calls.log"
+export BOOTSTRAP_SETTINGS_LOG="$tmp_dir/settings-hml.env"
 : > "$BOOTSTRAP_AWS_BATCH_COUNT"
 
 cat > "$bin_dir/aws" <<'FAKE_AWS'
@@ -102,6 +103,11 @@ case "$*" in
     ;;
   *" create configmap $settings_configmap "*)
     [[ "${BOOTSTRAP_KUBECTL_MODE:-success}" != fail-settings-configmap ]] || exit 1
+    for argument in "$@"; do
+      if [[ "$argument" == --from-env-file=* ]]; then
+        cp "${argument#--from-env-file=}" "$BOOTSTRAP_SETTINGS_LOG"
+      fi
+    done
     printf 'apiVersion: v1\nkind: ConfigMap\n'
     ;;
   *'apply -f '*)
@@ -135,8 +141,6 @@ cat > "$BOOTSTRAP_SSM_FIXTURE" <<'PARAMETERS'
     {"Name":"/auto-shop/staging/database/secrets/lambda-hml-arn","Type":"String","Value":"arn:aws:secretsmanager:us-east-1:035611741563:secret:auto-shop/staging/hml/lambda-auth-ghi789"},
     {"Name":"/auto-shop/staging/database/secrets/lambda-prd-arn","Type":"String","Value":"arn:aws:secretsmanager:us-east-1:035611741563:secret:auto-shop/staging/prd/lambda-auth-jkl012"},
     {"Name":"/auto-shop/staging/database/secrets/migrations-hml-arn","Type":"String","Value":"arn:aws:secretsmanager:us-east-1:035611741563:secret:auto-shop/staging/hml/migrations-mno345"},
-    {"Name":"/auto-shop/staging/database/iam/bootstrap-role-arn/hml","Type":"String","Value":"arn:aws:iam::035611741563:role/auto-shop/auto-shop-staging-db-bootstrap-hml"},
-    {"Name":"/auto-shop/staging/database/iam/bootstrap-role-arn/prd","Type":"String","Value":"arn:aws:iam::035611741563:role/auto-shop/auto-shop-staging-db-bootstrap-prd"},
     {"Name":"/auto-shop/staging/database/secrets/migrations-prd-arn","Type":"String","Value":"arn:aws:secretsmanager:us-east-1:035611741563:secret:auto-shop/staging/prd/migrations-pqr678"},
     {"Name":"/auto-shop/staging/database/secrets/owner-arn","Type":"String","Value":"arn:aws:secretsmanager:us-east-1:035611741563:secret:rds!db-autoshop-abc123"},
     {"Name":"/auto-shop/staging/eks/cluster-name","Type":"String","Value":"auto-shop-staging"}
@@ -159,6 +163,11 @@ grep -Fq 'apply -f ' "$BOOTSTRAP_KUBECTL_CALLS" \
   || { printf 'FAIL: bootstrap omitted applying Kubernetes resources\n' >&2; exit 1; }
 grep -Fq 'delete job/auto-shop-db-bootstrap-hml' "$BOOTSTRAP_KUBECTL_CALLS" \
   || fail 'bootstrap cleanup did not delete the temporary job'
+grep -Fq 'BOOTSTRAP_ROLE_ARN=arn:aws:iam::035611741563:role/auto-shop/auto-shop-staging-db-bootstrap-hml' "$BOOTSTRAP_SETTINGS_LOG" \
+  || fail 'HML bootstrap did not derive and pass its environment-specific role ARN'
+if grep -Fq 'bootstrap-role-arn' "$BOOTSTRAP_AWS_CALLS"; then
+  fail 'HML bootstrap must not request a role ARN SSM parameter'
+fi
 if grep -Fq 'prd' "$BOOTSTRAP_AWS_CALLS" "$BOOTSTRAP_KUBECTL_CALLS"; then
   fail 'HML bootstrap requested a PRD resource'
 fi
@@ -167,11 +176,17 @@ fi
 BOOTSTRAP_EXPECTED_ENVIRONMENT=prd BOOTSTRAP_AWS_CALLS="$tmp_dir/aws-prd-calls.log" \
   BOOTSTRAP_AWS_BATCH_COUNT="$tmp_dir/aws-prd-batch-count" \
   BOOTSTRAP_KUBECTL_CALLS="$tmp_dir/kubectl-prd-calls.log" PATH="$bin_dir:$PATH" \
+  BOOTSTRAP_SETTINGS_LOG="$tmp_dir/settings-prd.env" \
   bash "$repo_root/scripts/bootstrap-db.sh" bootstrap prd > "$tmp_dir/bootstrap-prd.out"
 grep -Fq 'PASS: database Job phase bootstrap completed' "$tmp_dir/bootstrap-prd.out" \
   || fail 'PRD bootstrap runtime did not complete against local fixtures'
 grep -Fq 'get serviceaccount/auto-shop-db-bootstrap-prd' "$tmp_dir/kubectl-prd-calls.log" \
   || fail 'PRD bootstrap did not require its selected service account'
+grep -Fq 'BOOTSTRAP_ROLE_ARN=arn:aws:iam::035611741563:role/auto-shop/auto-shop-staging-db-bootstrap-prd' "$tmp_dir/settings-prd.env" \
+  || fail 'PRD bootstrap did not derive and pass its environment-specific role ARN'
+if grep -Fq 'bootstrap-role-arn' "$tmp_dir/aws-prd-calls.log"; then
+  fail 'PRD bootstrap must not request a role ARN SSM parameter'
+fi
 if grep -Fq 'hml' "$tmp_dir/aws-prd-calls.log" "$tmp_dir/kubectl-prd-calls.log"; then
   fail 'PRD bootstrap requested an HML resource'
 fi
@@ -249,12 +264,6 @@ expect_invalid_parameter invalid_lambda_hml_arn /auto-shop/staging/database/secr
   'selected Lambda secret ARN is invalid'
 expect_invalid_parameter invalid_owner_arn /auto-shop/staging/database/secrets/owner-arn arn:invalid \
   'RDS owner secret ARN is invalid'
-expect_invalid_parameter invalid_bootstrap_role_arn /auto-shop/staging/database/iam/bootstrap-role-arn/hml arn:invalid \
-  'bootstrap role ARN does not match the selected environment contract'
-expect_invalid_parameter cross_environment_bootstrap_role /auto-shop/staging/database/iam/bootstrap-role-arn/hml \
-  arn:aws:iam::035611741563:role/auto-shop/auto-shop-staging-db-bootstrap-prd \
-  'bootstrap role ARN does not match the selected environment contract'
-
 expect_bootstrap_failure kubeconfig_failure 'EKS kubeconfig setup failed' \
   "$BOOTSTRAP_SSM_FIXTURE" 035611741563 true
 expect_bootstrap_failure failed_job 'bootstrap Job phase bootstrap failed; private diagnostics were discarded' \

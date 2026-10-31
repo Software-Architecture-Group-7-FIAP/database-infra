@@ -26,6 +26,10 @@ for root in "$staging_root" "$hml_root" "$prd_root"; do
   grep -Fq 'use_lockfile = true' "$root/versions.tf" \
     || fail "S3 native state locking is missing from ${root#"$repo_root"/}"
 done
+for root in "$staging_root" "$hml_root" "$prd_root"; do
+  grep -Fq 'prefix = "/auto-shop/staging"' "$root/main.tf" \
+    || fail "SSM contract prefix changed in ${root#"$repo_root"/}"
+done
 
 [[ ! -d "$repo_root/envs/production" ]] || fail 'production RDS Terraform root is prohibited'
 grep -Fq 'key          = "database-infra/staging/terraform.tfstate"' "$staging_root/versions.tf" \
@@ -78,12 +82,59 @@ required_ssm_paths=(
   /auto-shop/staging/database/secrets/runtime-prd-arn
   /auto-shop/staging/database/secrets/lambda-hml-arn
   /auto-shop/staging/database/secrets/lambda-prd-arn
+  /auto-shop/staging/database/secrets/migrations-hml-arn
+  /auto-shop/staging/database/secrets/migrations-prd-arn
   /auto-shop/staging/database/secrets/owner-arn
+  /auto-shop/staging/database/iam/lambda-read-policy-arn/hml
+  /auto-shop/staging/database/iam/lambda-read-policy-arn/prd
+  /auto-shop/staging/database/iam/migrations-hml-read-policy-arn
+  /auto-shop/staging/database/iam/migrations-prd-read-policy-arn
 )
+[[ "${#required_ssm_paths[@]}" -eq 16 ]] || fail 'the closed database SSM contract must contain exactly 16 names'
 for parameter in "${required_ssm_paths[@]}"; do
   grep -Fq "$parameter" "$repo_root/README.md" \
     || fail "README does not document the issue #5 SSM contract path: $parameter"
 done
+grep -Fq 'elas não são parâmetros SSM' "$repo_root/README.md" \
+  || fail 'README must state that bootstrap role ARNs are excluded from the SSM contract'
+for consumer_contract in \
+  'ESO HML:' \
+  'ESO PRD:' \
+  'Job de migrations HML' \
+  'Job de migrations PRD' \
+  'somente o Job de bootstrap deste repositório' \
+  'role da função `lambda-auth` hml' \
+  'role da função `lambda-auth` prd'; do
+  grep -Fq "$consumer_contract" "$repo_root/README.md" \
+    || fail "README omitted the database SSM consumer mapping: $consumer_contract"
+done
+
+expected_ssm_keys=(
+  database/host
+  database/port
+  database/security-group-id
+  database/secrets/owner-arn
+  database/names/hml
+  database/secrets/runtime-hml-arn
+  database/secrets/lambda-hml-arn
+  database/secrets/migrations-hml-arn
+  database/iam/lambda-read-policy-arn/hml
+  database/iam/migrations-hml-read-policy-arn
+  database/names/prd
+  database/secrets/runtime-prd-arn
+  database/secrets/lambda-prd-arn
+  database/secrets/migrations-prd-arn
+  database/iam/lambda-read-policy-arn/prd
+  database/iam/migrations-prd-read-policy-arn
+)
+actual_ssm_keys="$(
+  rg -o --no-filename '"database/[^"]+"' "$staging_root/main.tf" "$hml_root/main.tf" "$prd_root/main.tf" \
+    | tr -d '"' \
+    | sort -u
+)"
+expected_ssm_keys_sorted="$(printf '%s\n' "${expected_ssm_keys[@]}" | sort -u)"
+[[ "$actual_ssm_keys" == "$expected_ssm_keys_sorted" ]] \
+  || fail 'the Terraform roots must publish exactly the 16 approved SSM keys'
 
 for output_name in db_host db_port db_security_group_id db_names runtime_secret_arns lambda_secret_arns owner_secret_arn ssm_parameters; do
   grep -Fq "output \"$output_name\"" "$staging_root/outputs.tf" \
@@ -141,8 +192,7 @@ for environment in hml prd; do
     "database/secrets/lambda-$environment-arn" \
     "database/secrets/migrations-$environment-arn" \
     "database/iam/lambda-read-policy-arn/$environment" \
-    "database/iam/migrations-$environment-read-policy-arn" \
-    "database/iam/bootstrap-role-arn/$environment"; do
+    "database/iam/migrations-$environment-read-policy-arn"; do
     grep -Fq "\"$parameter\"" "$root/main.tf" || fail "${environment} root is missing SSM key: $parameter"
   done
   if rg -n '^resource "aws_(db_instance|db_subnet_group|security_group|eks_pod_identity_association)"' "$root"; then
@@ -155,14 +205,14 @@ done
 
 for contract in \
   'auto-shop-staging-db-bootstrap-hml' \
-  '/auto-shop/staging/database/iam/bootstrap-role-arn/hml' \
   'auto-shop-ops/auto-shop-db-bootstrap-hml' \
   'auto-shop-staging-db-bootstrap-prd' \
-  '/auto-shop/staging/database/iam/bootstrap-role-arn/prd' \
   'auto-shop-ops/auto-shop-db-bootstrap-prd'; do
   grep -Fq "$contract" "$repo_root/.github/database-delivery.md" \
     || fail "database delivery docs omitted the DB/K8s bootstrap handshake value: $contract"
 done
+grep -Fq 'derived by the bootstrap runner' "$repo_root/.github/database-delivery.md" \
+  || fail 'database delivery docs must state that the bootstrap role ARN is derived, not published to SSM'
 
 if rg -n -g '!**/tests/**' 'aws_db_proxy|terraform_remote_state|aws_secretsmanager_secret_version|random_password|SecureString' "$repo_root/envs" "$repo_root/modules"; then
   fail 'Terraform contains a resource or value prohibited by the database contract'
