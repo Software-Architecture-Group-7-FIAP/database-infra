@@ -371,7 +371,7 @@ for response_mode in missing null; do
   run_malformed_orphan_list_case ORPHAN_TEST_AUTOMATED_SNAPSHOT_MODE "$response_mode" \
     'automated RDS snapshots'
   run_malformed_orphan_list_case ORPHAN_TEST_POD_IDENTITY_MODE "$response_mode" \
-    'bootstrap Pod Identity association'
+    'shared bootstrap Pod Identity association'
 done
 record_critical_branch orphan_list_response_shapes_fail_closed
 
