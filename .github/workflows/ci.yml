@@ -29,22 +29,29 @@ jobs:
     permissions:
       actions: read
     steps:
-      - name: Verify staging only allows deployments from main
+      - name: Verify staging and aws-plan allow only main
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          environment_url="repos/${GITHUB_REPOSITORY}/environments/staging"
-          deployment_policy="$(gh api "$environment_url" --jq '.deployment_branch_policy | [.custom_branch_policies, .protected_branches] | @json')"
-          if [[ "$deployment_policy" != '[true,false]' ]]; then
-            echo "::error::The staging environment must use a custom deployment policy, not protected-branch wildcards."
-            exit 1
-          fi
-          allowed_branches="$(gh api --paginate "$environment_url/deployment-branch-policies" --jq '.branch_policies[].name' | sort)"
-          if [[ "$allowed_branches" != 'main' ]]; then
-            echo "::error::The staging environment must allow exactly the main branch."
-            exit 1
-          fi
+          require_main_only_environment() {
+            local name="$1"
+            local environment_url="repos/${GITHUB_REPOSITORY}/environments/${name}"
+            local deployment_policy
+            deployment_policy="$(gh api "$environment_url" --jq '.deployment_branch_policy | [.custom_branch_policies, .protected_branches] | @json')"
+            if [[ "$deployment_policy" != '[true,false]' ]]; then
+              echo "::error::Environment $name must use a custom deployment policy, not protected-branch wildcards."
+              exit 1
+            fi
+            local allowed_branches
+            allowed_branches="$(gh api --paginate "$environment_url/deployment-branch-policies" --jq '.branch_policies[].name' | sort)"
+            if [[ "$allowed_branches" != 'main' ]]; then
+              echo "::error::Environment $name must allow exactly the main branch."
+              exit 1
+            fi
+          }
+          require_main_only_environment staging
+          require_main_only_environment aws-plan
 
   static:
     name: Terraform and shell checks
@@ -181,7 +188,7 @@ jobs:
     name: Read-only staging plan
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    needs: [static, sql]
+    needs: [static, sql, environment-policy]
     environment: aws-plan
     permissions:
       contents: read

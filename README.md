@@ -153,6 +153,8 @@ O bootstrap operacional está implementado localmente. O Job usa AWS CLI para ob
 
 `ci.yml` roda fmt, validate sem backend, testes mockados dos módulos, TFLint, Checkov, ShellCheck, contrato estático, guard de planos e integração SQL em PostgreSQL 16. O plano que acessa o backend não roda em PR: o job de plan só aceita `workflow_dispatch` em `main`, valida o operador antes de solicitar OIDC e usa a role separada `AWS_PLAN_ROLE_ARN`. Ele pula o plan se os contratos do `k8s-infra` ou o cluster ainda não existirem; AccessDenied/rede falham em vez de serem tratados como ausência.
 
+O Environment GitHub `aws-plan` deve permitir somente `main`; a CI confere essa policy junto da policy `staging` antes do plan. O trust AWS usa o subject OIDC imutável do repositório no Environment `aws-plan`. O workflow também valida `github.ref == refs/heads/main`; os jobs de PR continuam sem permissão para solicitar tokens OIDC ou assumir roles.
+
 ### Isolamento de planos em pull requests
 
 PRs não recebem OIDC, credenciais AWS nem acesso ao backend/state. Eles executam validação com `terraform init -backend=false`, testes com providers mockados, TFLint, Checkov e contratos estáticos. Um plan remoto não é seguro para código ainda não revisado: `terraform init`/plan acessa o state remoto, que deve ser tratado como dado sensível, enquanto providers e data sources processam a configuração do PR durante o plan. Uma aprovação de deployment apenas pausa o job; depois da aprovação, o código do PR ainda executaria com as credenciais e poderia ler o state. `pull_request_target` com checkout do PR tem o mesmo problema de confiança.
