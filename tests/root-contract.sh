@@ -174,6 +174,8 @@ fi
 for output_name in db_host db_port db_security_group_id db_names runtime_secret_arns lambda_secret_arns owner_secret_arn bootstrap_role_arn ssm_parameters; do
   grep -Fq "output \"$output_name\"" "$staging_root/outputs.tf" || fail "shared root output is missing: $output_name"
 done
+grep -Fq '/auto-shop/staging/database/iam/owner-read-policy-arn' "$repo_root/scripts/orphans.sh" \
+  || fail 'orphan scan must continue checking that the removed owner-read SSM contract stays absent'
 for environment in hml prd; do
   root="$repo_root/envs/$environment/database"
   for output_name in environment db_name runtime_secret_arn lambda_secret_arn migration_secret_arn lambda_read_policy_arn migration_read_policy_arn bootstrap_secret_access_policy_arn bootstrap_role_arn ssm_parameters; do

@@ -79,6 +79,14 @@ run "creates_an_ephemeral_private_postgres_instance" {
   }
 
   assert {
+    condition = anytrue([
+      for parameter in aws_db_parameter_group.this.parameter :
+      parameter.name == "rds.force_ssl" && parameter.apply_method == "pending-reboot"
+    ])
+    error_message = "The force_ssl apply method must match the RDS parameter group's effective metadata."
+  }
+
+  assert {
     condition = (
       output.address == "auto-shop-staging.mock.invalid" &&
       output.port == 5432 &&
