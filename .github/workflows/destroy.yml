@@ -163,11 +163,20 @@ jobs:
                 --session-token "$REQUESTED_SESSION_TOKEN" \
                 --lifecycle-dispatch-id "$REQUESTED_LIFECYCLE_DISPATCH_ID" \
                 --confirmation "$REQUESTED_CONFIRMATION"
-              if ! kubectl -n auto-shop-ops delete job/auto-shop-db-bootstrap configmap/auto-shop-db-bootstrap-sql configmap/auto-shop-db-bootstrap-settings serviceaccount/auto-shop-db-bootstrap --ignore-not-found > "$temp_dir/kubernetes-cleanup.log" 2>&1; then
-                echo "::error::Bootstrap Kubernetes cleanup failed; private diagnostics were discarded."
+              if kubectl --request-timeout=30s \
+                -n auto-shop-ops delete \
+                job/auto-shop-db-bootstrap \
+                configmap/auto-shop-db-bootstrap-sql \
+                configmap/auto-shop-db-bootstrap-settings \
+                serviceaccount/auto-shop-db-bootstrap \
+                --ignore-not-found > "$temp_dir/kubernetes-cleanup.log" 2>&1; then
+                echo "Bootstrap Kubernetes remnants removed." >> "$GITHUB_STEP_SUMMARY"
+              else
+                python3 scripts/classify_kubernetes_cleanup_failure.py \
+                  "$temp_dir/kubernetes-cleanup.log" >> "$GITHUB_STEP_SUMMARY" || true
+                echo "::error::Bootstrap Kubernetes cleanup failed; Terraform destroy remains blocked."
                 exit 1
               fi
-              echo "Bootstrap Kubernetes remnants removed." >> "$GITHUB_STEP_SUMMARY"
             elif grep -q 'ResourceNotFoundException' "$temp_dir/cluster.stderr"; then
               cluster_present=false
               echo "The upstream EKS cluster is already absent; Kubernetes cleanup is skipped." >> "$GITHUB_STEP_SUMMARY"

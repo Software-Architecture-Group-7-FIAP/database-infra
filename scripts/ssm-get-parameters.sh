@@ -25,13 +25,19 @@ capture_ssm_get_parameters_batched() {
       return 1
     fi
 
+    if ! "$jq_bin" -e \
+      'type == "object" and (.Parameters | type == "array") and (.InvalidParameters | type == "array")' \
+      "$response_file" >/dev/null 2>&1; then
+      return 1
+    fi
+
     response_files+=("$response_file")
     offset=$((offset + 10))
     batch_index=$((batch_index + 1))
   done
 
   "$jq_bin" -s '{
-    Parameters: [ .[] | (.Parameters // [])[] ],
-    InvalidParameters: [ .[] | (.InvalidParameters // [])[] ]
+    Parameters: [ .[].Parameters[] ],
+    InvalidParameters: [ .[].InvalidParameters[] ]
   }' "${response_files[@]}" > "$output_file"
 }

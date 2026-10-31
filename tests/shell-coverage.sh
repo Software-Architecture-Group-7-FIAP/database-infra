@@ -123,6 +123,12 @@ critical_branches=(
   bootstrap_runtime_preflight_fails_closed
   smoke_full_runtime_job_preflight
   smoke_partial_metadata_failure
+  orphan_list_response_shapes_fail_closed
+  ssm_parameter_response_shapes_fail_closed
+  automated_backup_not_found_is_absent
+  automated_backup_response_shape_fails_closed
+  automated_backup_query_error_closed
+  destroy_kubernetes_cleanup_failure_blocks
   secret_absent_metadata
   secret_pending_then_absent
   secret_pending_timeout_closed
