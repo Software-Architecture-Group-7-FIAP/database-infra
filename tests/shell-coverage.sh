@@ -135,9 +135,7 @@ critical_branches=(
   secret_query_error_closed
   fake_aws_forbids_secret_and_broad_ssm_reads
   workflow_apply_authorization_contract
-  partial_apply_rollback_uses_exact_saved_destroy_plan
-  partial_apply_rollback_continues_when_outputs_unavailable
-  partial_apply_rollback_verifies_resources_absent_from_state
+  shared_database_partial_rollback_fails_closed
 )
 
 for branch in "${critical_branches[@]}"; do

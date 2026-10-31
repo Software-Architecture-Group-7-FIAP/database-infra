@@ -117,7 +117,7 @@ fi
 record_critical_branch bootstrap_bundle_static_verify
 
 for phase in bootstrap grants; do
-  if bash "$repo_root/scripts/bootstrap-db.sh" "$phase" >"$tmp_dir/bootstrap-$phase.out" 2>&1; then
+  if bash "$repo_root/scripts/bootstrap-db.sh" "$phase" hml >"$tmp_dir/bootstrap-$phase.out" 2>&1; then
     fail "bootstrap preflight unexpectedly succeeded without an AWS fixture"
   else
     status=$?
@@ -129,7 +129,7 @@ for phase in bootstrap grants; do
 done
 record_critical_branch bootstrap_runtime_preflight_fails_closed
 
-if bash "$repo_root/scripts/smoke.sh" full >"$tmp_dir/smoke-full.out" 2>&1; then
+if bash "$repo_root/scripts/smoke.sh" full hml >"$tmp_dir/smoke-full.out" 2>&1; then
   fail 'full smoke unexpectedly succeeded without an AWS fixture'
 else
   status=$?
@@ -150,6 +150,9 @@ grep -Fq 'usage: orphans.sh' "$tmp_dir/orphans-no-arguments.out" || fail 'orphan
 cat > "$tmp_dir/bin/orphan-aws" <<'SH'
 #!/usr/bin/env bash
 arguments="$*"
+if [[ -n "${ORCHESTRATION_TEST_AWS_CALLS:-}" ]]; then
+  printf '%s\n' "$arguments" >> "$ORCHESTRATION_TEST_AWS_CALLS"
+fi
 case "$arguments" in
   *"get-secret-value"*|*"get-parameters-by-path"*|*"GetSecretValue"*|*"GetParametersByPath"*) printf 'prohibited API request\n' >&2; exit 98 ;;
   *"resourcegroupstaggingapi get-resources"*)
@@ -325,12 +328,18 @@ else
 fi
 
 : > "$tmp_dir/orphans-batches.log"
+ORCHESTRATION_TEST_AWS_CALLS="$tmp_dir/orphans-aws-calls.log" \
 ORCHESTRATION_TEST_SSM_BATCH_LOG="$tmp_dir/orphans-batches.log" AWS_BIN="$tmp_dir/bin/orphan-aws" \
   bash "$repo_root/scripts/orphans.sh" "$tmp_dir/manifest.json" > "$tmp_dir/orphans.out"
 grep -Fq 'PASS: database-infra orphan scan completed' "$tmp_dir/orphans.out" || fail 'orphan scan did not complete against empty fixtures'
-printf '10\n6\n' > "$tmp_dir/expected-ssm-batches.log"
-printf '10\n7\n' > "$tmp_dir/expected-orphan-ssm-batches.log"
+printf '10\n9\n' > "$tmp_dir/expected-orphan-ssm-batches.log"
 cmp -s "$tmp_dir/expected-orphan-ssm-batches.log" "$tmp_dir/orphans-batches.log" || fail 'orphan scan did not query all published parameters in 10-name batches'
+for environment in hml prd; do
+  grep -Fq "iam get-role --role-name auto-shop-staging-db-bootstrap-$environment" \
+    "$tmp_dir/orphans-aws-calls.log" || fail "orphan scan omitted the $environment bootstrap role"
+  grep -Fq "eks list-pod-identity-associations --cluster-name auto-shop-staging --namespace auto-shop-ops --service-account auto-shop-db-bootstrap-$environment" \
+    "$tmp_dir/orphans-aws-calls.log" || fail "orphan scan omitted the $environment Pod Identity association"
+done
 if grep -Fq 'CANARY_SECRET_VALUE' "$tmp_dir/orphans.out"; then
   fail 'orphan scan leaked a canary value'
 fi
@@ -362,7 +371,7 @@ for response_mode in missing null; do
   run_malformed_orphan_list_case ORPHAN_TEST_AUTOMATED_SNAPSHOT_MODE "$response_mode" \
     'automated RDS snapshots'
   run_malformed_orphan_list_case ORPHAN_TEST_POD_IDENTITY_MODE "$response_mode" \
-    'bootstrap Pod Identity association'
+    'shared bootstrap Pod Identity association'
 done
 record_critical_branch orphan_list_response_shapes_fail_closed
 
@@ -561,11 +570,12 @@ cat > "$tmp_dir/smoke-fixtures/parameters.json" <<'JSON'
     {"Name":"/auto-shop/staging/database/secrets/lambda-prd-arn","Type":"String","Value":"arn:aws:secretsmanager:us-east-1:035611741563:secret:auto-shop/staging/prd/lambda-auth"},
     {"Name":"/auto-shop/staging/database/secrets/migrations-hml-arn","Type":"String","Value":"arn:aws:secretsmanager:us-east-1:035611741563:secret:auto-shop/staging/hml/migrations"},
     {"Name":"/auto-shop/staging/database/secrets/migrations-prd-arn","Type":"String","Value":"arn:aws:secretsmanager:us-east-1:035611741563:secret:auto-shop/staging/prd/migrations"},
-    {"Name":"/auto-shop/staging/database/secrets/owner-arn","Type":"String","Value":"arn:aws:secretsmanager:us-east-1:035611741563:secret:rds!db-example"},
     {"Name":"/auto-shop/staging/database/iam/lambda-read-policy-arn/hml","Type":"String","Value":"arn:aws:iam::035611741563:policy/auto-shop/auto-shop-staging-db-read-lambda-hml"},
-    {"Name":"/auto-shop/staging/database/iam/lambda-read-policy-arn/prd","Type":"String","Value":"arn:aws:iam::035611741563:policy/auto-shop/auto-shop-staging-db-read-lambda-prd"},
     {"Name":"/auto-shop/staging/database/iam/migrations-hml-read-policy-arn","Type":"String","Value":"arn:aws:iam::035611741563:policy/auto-shop/auto-shop-staging-db-read-migrations-hml"},
-    {"Name":"/auto-shop/staging/database/iam/migrations-prd-read-policy-arn","Type":"String","Value":"arn:aws:iam::035611741563:policy/auto-shop/auto-shop-staging-db-read-migrations-prd"}
+    {"Name":"/auto-shop/staging/database/iam/bootstrap-role-arn/hml","Type":"String","Value":"arn:aws:iam::035611741563:role/auto-shop/auto-shop-staging-db-bootstrap-hml"},
+    {"Name":"/auto-shop/staging/database/iam/lambda-read-policy-arn/prd","Type":"String","Value":"arn:aws:iam::035611741563:policy/auto-shop/auto-shop-staging-db-read-lambda-prd"},
+    {"Name":"/auto-shop/staging/database/iam/migrations-prd-read-policy-arn","Type":"String","Value":"arn:aws:iam::035611741563:policy/auto-shop/auto-shop-staging-db-read-migrations-prd"},
+    {"Name":"/auto-shop/staging/database/iam/bootstrap-role-arn/prd","Type":"String","Value":"arn:aws:iam::035611741563:role/auto-shop/auto-shop-staging-db-bootstrap-prd"}
   ]
 }
 JSON
@@ -604,12 +614,20 @@ case "$arguments" in
         reading_names=false
       elif [[ "$reading_names" == true ]]; then
         requested_names+=("$argument")
+        case "$argument" in
+          *hml*|*prd*)
+            if [[ "$argument" != *"${SMOKE_EXPECTED_ENVIRONMENT:-hml}"* ]]; then
+              printf 'smoke requested a parameter for a different environment\n' >&2
+              exit 253
+            fi
+            ;;
+        esac
       fi
     done
     [[ "${#requested_names[@]}" -le 10 ]] || { printf 'ValidationException: GetParameters accepts at most 10 names\n' >&2; exit 254; }
     printf '%s\n' "${#requested_names[@]}" >> "$ORCHESTRATION_TEST_SSM_BATCH_LOG"
     batch_index="$(wc -l < "$ORCHESTRATION_TEST_SSM_BATCH_LOG")"
-    if [[ "${SMOKE_TEST_FAILURE:-}" == ssm_second_batch && "$batch_index" -eq 2 ]]; then
+    if [[ "${SMOKE_TEST_FAILURE:-}" == ssm_selected_environment && "$batch_index" -eq 1 ]]; then
       printf 'AccessDeniedException: metadata query denied\n' >&2
       exit 255
     fi
@@ -619,7 +637,7 @@ case "$arguments" in
       {
         Parameters: [$fixture.Parameters[]? | select(.Name as $name | ($requested | index($name)) != null)
           | if $failure == "invalid_security_group_id" and .Name == "/auto-shop/staging/database/security-group-id" then .Value = "invalid" else . end],
-        InvalidParameters: [$requested[] as $name | select(any($fixture.Parameters[]?; .Name == $name) | not)]
+        InvalidParameters: [$requested[] as $name | select(any($fixture.Parameters[]?; .Name == $name) | not) | $name]
       }
     ' "$SMOKE_FIXTURE_DIR/parameters.json"
     ;;
@@ -654,16 +672,22 @@ chmod +x "$tmp_dir/bin/smoke-aws"
 assert_secret_value_apis_denied "$tmp_dir/bin/smoke-aws"
 record_critical_branch fake_aws_forbids_secret_and_broad_ssm_reads
 SMOKE_FIXTURE_DIR="$tmp_dir/smoke-fixtures" ORCHESTRATION_TEST_SSM_BATCH_LOG="$tmp_dir/smoke-batches.log" AWS_BIN="$tmp_dir/bin/smoke-aws" \
-  TMPDIR="${TMPDIR:-/tmp}" bash "$repo_root/scripts/smoke.sh" initial > "$tmp_dir/smoke-initial.out"
+  TMPDIR="${TMPDIR:-/tmp}" bash "$repo_root/scripts/smoke.sh" initial hml > "$tmp_dir/smoke-initial.out"
 grep -Fq 'PASS: initial metadata and network smoke completed' "$tmp_dir/smoke-initial.out" || fail 'initial smoke did not complete against valid fixtures'
-cmp -s "$tmp_dir/expected-ssm-batches.log" "$tmp_dir/smoke-batches.log" || fail 'initial smoke did not query all output parameters in 10-name batches'
+printf '10\n' > "$tmp_dir/expected-smoke-batches.log"
+cmp -s "$tmp_dir/expected-smoke-batches.log" "$tmp_dir/smoke-batches.log" || fail 'HML smoke did not query exactly its 10 selected output parameters'
+SMOKE_EXPECTED_ENVIRONMENT=prd SMOKE_FIXTURE_DIR="$tmp_dir/smoke-fixtures" \
+  ORCHESTRATION_TEST_SSM_BATCH_LOG="$tmp_dir/smoke-prd-batches.log" AWS_BIN="$tmp_dir/bin/smoke-aws" \
+  TMPDIR="${TMPDIR:-/tmp}" bash "$repo_root/scripts/smoke.sh" initial prd > "$tmp_dir/smoke-prd.out"
+grep -Fq 'PASS: initial metadata and network smoke completed' "$tmp_dir/smoke-prd.out" || fail 'PRD smoke did not complete against valid fixtures'
+cmp -s "$tmp_dir/expected-smoke-batches.log" "$tmp_dir/smoke-prd-batches.log" || fail 'PRD smoke did not query exactly its 10 selected output parameters'
 if grep -Fq 'CANARY_SECRET_VALUE' "$tmp_dir/smoke-initial.out"; then
   fail 'initial smoke leaked a canary value'
 fi
 
 if SMOKE_TEST_FAILURE=secret_metadata \
   SMOKE_FIXTURE_DIR="$tmp_dir/smoke-fixtures" ORCHESTRATION_TEST_SSM_BATCH_LOG="$tmp_dir/smoke-partial-batches.log" AWS_BIN="$tmp_dir/bin/smoke-aws" \
-  TMPDIR="${TMPDIR:-/tmp}" bash "$repo_root/scripts/smoke.sh" initial > "$tmp_dir/smoke-partial-failure.out" 2>&1; then
+  TMPDIR="${TMPDIR:-/tmp}" bash "$repo_root/scripts/smoke.sh" initial hml > "$tmp_dir/smoke-partial-failure.out" 2>&1; then
   fail 'initial smoke unexpectedly accepted a secret metadata query failure after earlier checks passed'
 else
   status=$?
@@ -677,7 +701,7 @@ fi
 
 if SMOKE_TEST_FAILURE=invalid_rds_contract \
   SMOKE_FIXTURE_DIR="$tmp_dir/smoke-fixtures" ORCHESTRATION_TEST_SSM_BATCH_LOG="$tmp_dir/smoke-invalid-rds-batches.log" AWS_BIN="$tmp_dir/bin/smoke-aws" \
-  TMPDIR="${TMPDIR:-/tmp}" bash "$repo_root/scripts/smoke.sh" initial > "$tmp_dir/smoke-invalid-rds.out" 2>&1; then
+  TMPDIR="${TMPDIR:-/tmp}" bash "$repo_root/scripts/smoke.sh" initial hml > "$tmp_dir/smoke-invalid-rds.out" 2>&1; then
   fail 'initial smoke accepted a publicly accessible RDS instance'
 else
   status=$?
@@ -687,7 +711,7 @@ fi
 
 if SMOKE_TEST_FAILURE=mismatched_subnet_group \
   SMOKE_FIXTURE_DIR="$tmp_dir/smoke-fixtures" ORCHESTRATION_TEST_SSM_BATCH_LOG="$tmp_dir/smoke-invalid-subnet-batches.log" AWS_BIN="$tmp_dir/bin/smoke-aws" \
-  TMPDIR="${TMPDIR:-/tmp}" bash "$repo_root/scripts/smoke.sh" initial > "$tmp_dir/smoke-invalid-subnet.out" 2>&1; then
+  TMPDIR="${TMPDIR:-/tmp}" bash "$repo_root/scripts/smoke.sh" initial hml > "$tmp_dir/smoke-invalid-subnet.out" 2>&1; then
   fail 'initial smoke accepted a subnet group that differs from the upstream subnet list'
 else
   status=$?
@@ -695,24 +719,24 @@ else
   grep -Fq 'RDS subnet group does not match the upstream isolated subnet list' "$tmp_dir/smoke-invalid-subnet.out" || fail 'invalid subnet group was not rejected'
 fi
 
-if SMOKE_TEST_FAILURE=ssm_second_batch \
+if SMOKE_TEST_FAILURE=ssm_selected_environment \
   SMOKE_FIXTURE_DIR="$tmp_dir/smoke-fixtures" ORCHESTRATION_TEST_SSM_BATCH_LOG="$tmp_dir/smoke-ssm-failure-batches.log" AWS_BIN="$tmp_dir/bin/smoke-aws" \
-  TMPDIR="${TMPDIR:-/tmp}" bash "$repo_root/scripts/smoke.sh" initial > "$tmp_dir/smoke-ssm-failure.out" 2>&1; then
-  fail 'initial smoke unexpectedly accepted an SSM failure in the second name batch'
+  TMPDIR="${TMPDIR:-/tmp}" bash "$repo_root/scripts/smoke.sh" initial hml > "$tmp_dir/smoke-ssm-failure.out" 2>&1; then
+  fail 'HML smoke unexpectedly accepted an SSM metadata query failure'
 else
   status=$?
   [[ "$status" -eq 1 ]] || fail "SSM batch failure returned $status instead of a closed failure"
   grep -Fq 'SSM parameter metadata query failed' "$tmp_dir/smoke-ssm-failure.out" || fail 'SSM batch failure did not report a metadata query error'
 fi
-cmp -s "$tmp_dir/expected-ssm-batches.log" "$tmp_dir/smoke-ssm-failure-batches.log" || fail 'initial smoke did not fail after attempting the second 10-name batch'
-record_critical_branch smoke_ssm_second_batch_failure
+cmp -s "$tmp_dir/expected-smoke-batches.log" "$tmp_dir/smoke-ssm-failure-batches.log" || fail 'HML smoke did not fail on its first selected-environment SSM batch'
+record_critical_branch smoke_ssm_selected_environment_failure
 if grep -Fq 'CANARY_SECRET_VALUE' "$tmp_dir/smoke-ssm-failure.out"; then
   fail 'SSM batch failure leaked a canary value'
 fi
 
 if SMOKE_TEST_FAILURE=invalid_security_group_id \
   SMOKE_FIXTURE_DIR="$tmp_dir/smoke-fixtures" ORCHESTRATION_TEST_SSM_BATCH_LOG="$tmp_dir/smoke-invalid-sg-batches.log" AWS_BIN="$tmp_dir/bin/smoke-aws" \
-  TMPDIR="${TMPDIR:-/tmp}" bash "$repo_root/scripts/smoke.sh" initial > "$tmp_dir/smoke-invalid-sg.out" 2>&1; then
+  TMPDIR="${TMPDIR:-/tmp}" bash "$repo_root/scripts/smoke.sh" initial hml > "$tmp_dir/smoke-invalid-sg.out" 2>&1; then
   fail 'initial smoke accepted an invalid published security group ID'
 else
   status=$?
@@ -720,23 +744,23 @@ else
   grep -Fq 'published database security group ID is invalid' "$tmp_dir/smoke-invalid-sg.out" || fail 'invalid security group ID was not rejected at the published contract boundary'
 fi
 
-if bash "$repo_root/scripts/smoke.sh" invalid-phase > "$tmp_dir/smoke-invalid-phase.out" 2>&1; then
+if bash "$repo_root/scripts/smoke.sh" invalid-phase hml > "$tmp_dir/smoke-invalid-phase.out" 2>&1; then
   fail 'smoke accepted an unsupported phase'
 else
   status=$?
   [[ "$status" -eq 64 ]] || fail "unsupported smoke phase returned $status instead of usage status 64"
-  grep -Fq 'usage: smoke.sh [initial|full]' "$tmp_dir/smoke-invalid-phase.out" || fail 'unsupported smoke phase did not report usage'
+  grep -Fq 'usage: smoke.sh <initial|full> <hml|prd>' "$tmp_dir/smoke-invalid-phase.out" || fail 'unsupported smoke phase did not report usage'
 fi
 
-if bash "$repo_root/scripts/smoke.sh" initial extra > "$tmp_dir/smoke-extra-arguments.out" 2>&1; then
-  fail 'smoke accepted more than one phase argument'
+if bash "$repo_root/scripts/smoke.sh" initial hml extra > "$tmp_dir/smoke-extra-arguments.out" 2>&1; then
+  fail 'smoke accepted extra arguments'
 else
   status=$?
   [[ "$status" -eq 64 ]] || fail "extra smoke arguments returned $status instead of usage status 64"
-  grep -Fq 'usage: smoke.sh [initial|full]' "$tmp_dir/smoke-extra-arguments.out" || fail 'extra smoke arguments did not report usage'
+  grep -Fq 'usage: smoke.sh <initial|full> <hml|prd>' "$tmp_dir/smoke-extra-arguments.out" || fail 'extra smoke arguments did not report usage'
 fi
 
-if AWS_BIN=missing-smoke-aws bash "$repo_root/scripts/smoke.sh" initial > "$tmp_dir/smoke-missing-aws.out" 2>&1; then
+if AWS_BIN=missing-smoke-aws bash "$repo_root/scripts/smoke.sh" initial hml > "$tmp_dir/smoke-missing-aws.out" 2>&1; then
   fail 'smoke accepted a missing AWS CLI'
 else
   status=$?
@@ -745,7 +769,7 @@ else
 fi
 
 if AWS_BIN="$tmp_dir/bin/smoke-aws" JQ_BIN=missing-smoke-jq \
-  bash "$repo_root/scripts/smoke.sh" initial > "$tmp_dir/smoke-missing-jq.out" 2>&1; then
+  bash "$repo_root/scripts/smoke.sh" initial hml > "$tmp_dir/smoke-missing-jq.out" 2>&1; then
   fail 'smoke accepted a missing jq executable'
 else
   status=$?
@@ -753,131 +777,31 @@ else
   grep -Fq 'FAIL: jq is required' "$tmp_dir/smoke-missing-jq.out" || fail 'missing jq did not report a clear preflight error'
 fi
 
-mkdir -p "$tmp_dir/rollback-bin"
-cat > "$tmp_dir/rollback-bin/terraform" <<'SH'
-#!/usr/bin/env bash
-set -euo pipefail
-[[ "${1:-}" == -chdir=* ]] && shift
-command_name="${1:-}"
-shift || true
-case "$command_name" in
-  init)
-    [[ "${ROLLBACK_TEST_MODE:-}" != init-fail ]] || exit 1
-    ;;
-  state)
-    case "${ROLLBACK_TEST_MODE:-}" in
-      state-missing) printf 'No state file was found\n' >&2; exit 1 ;;
-      state-error) printf 'remote backend unavailable\n' >&2; exit 1 ;;
-      empty-state) exit 0 ;;
-    esac
-    printf 'module.instance.aws_db_instance.this\n'
-    ;;
-  show)
-    if [[ $# -eq 1 ]]; then
-      [[ "${ROLLBACK_TEST_MODE:-}" != state-show-fail ]] || exit 1
-      cat "$ROLLBACK_TEST_STATE_JSON"
-    else
-      [[ "${ROLLBACK_TEST_MODE:-}" != plan-show-fail ]] || exit 1
-      cat "$ROLLBACK_TEST_PLAN_JSON"
-    fi
-    ;;
-  output)
-    [[ "${ROLLBACK_TEST_MODE:-}" != output-fail ]] || exit 1
-    printf '{}\n'
-    ;;
-  plan)
-    [[ "${ROLLBACK_TEST_MODE:-}" != plan-fail ]] || exit 1
-    for argument in "$@"; do
-      [[ "$argument" == -out=* ]] && : > "${argument#-out=}"
-    done
-    ;;
-  apply)
-    touch "$ROLLBACK_TEST_APPLY_CALLED"
-    [[ "${ROLLBACK_TEST_MODE:-}" != apply-fail ]] || exit 1
-    ;;
-  *) printf 'unexpected Terraform command: %s\n' "$command_name" >&2; exit 97 ;;
-esac
-SH
-chmod +x "$tmp_dir/rollback-bin/terraform"
-cat > "$tmp_dir/rollback-state.json" <<'JSON'
-{"values":{"root_module":{"resources":[{"mode":"managed","address":"module.instance.aws_db_instance.this"}]}}}
-JSON
-cat > "$tmp_dir/rollback-plan.json" <<'JSON'
-{"format_version":"1.2","resource_changes":[{"address":"module.instance.aws_db_instance.this","mode":"managed","change":{"actions":["delete"]}}]}
-JSON
-cat > "$tmp_dir/rollback-invalid-plan.json" <<'JSON'
-{"format_version":"1.2","resource_changes":[{"address":"module.instance.aws_db_instance.this","mode":"managed","change":{"actions":["update"]}}]}
-JSON
+rollback_summary="$tmp_dir/rollback-summary.md"
+if PHASE=grants DATABASE_PARTIAL_ROLLBACK_SAFE=true GITHUB_STEP_SUMMARY="$rollback_summary" \
+  bash "$repo_root/scripts/rollback_partial_apply.sh"; then
+  :
+else
+  fail 'partial rollback did not retain resources for a non-bootstrap phase'
+fi
+grep -Fq 'Partial cleanup was not authorized' "$rollback_summary" || fail 'partial rollback did not record that a non-bootstrap phase was retained'
+if PHASE=bootstrap DATABASE_PARTIAL_ROLLBACK_SAFE=false GITHUB_STEP_SUMMARY="$rollback_summary" \
+  bash "$repo_root/scripts/rollback_partial_apply.sh"; then
+  :
+else
+  fail 'partial rollback failed when cleanup had not been authorized'
+fi
+grep -Fq 'Partial cleanup was not authorized' "$rollback_summary" || fail 'partial rollback did not record that unauthorized cleanup was retained'
+if PHASE=bootstrap DATABASE_PARTIAL_ROLLBACK_SAFE=true GITHUB_STEP_SUMMARY="$rollback_summary" \
+  bash "$repo_root/scripts/rollback_partial_apply.sh" > "$tmp_dir/rollback-authorized.out" 2>&1; then
+  fail 'partial rollback authorized deletion of the shared HML/PRD database'
+else
+  status=$?
+  [[ "$status" -eq 1 ]] || fail "shared database rollback returned $status instead of a closed failure"
+fi
+grep -Fq 'Automatic partial rollback of the shared HML/PRD RDS root is disabled' \
+  "$tmp_dir/rollback-authorized.out" || fail 'shared database rollback did not explain why deletion was retained'
+grep -Fq 'The shared RDS was retained' "$rollback_summary" || fail 'shared database rollback omitted the retention decision from the summary'
+record_critical_branch shared_database_partial_rollback_fails_closed
 
-run_rollback_case() {
-  local mode="$1"
-  local expected="$2"
-  local plan_json="${3:-$tmp_dir/rollback-plan.json}"
-  local status=0
-  rm -f "$tmp_dir/rollback-apply-called"
-  rm -f "$tmp_dir/rollback-orphan-scan-called"
-  if (
-    cd "$repo_root"
-    PATH="$tmp_dir/rollback-bin:$PATH" \
-      ROLLBACK_TEST_MODE="$mode" \
-      ROLLBACK_TEST_STATE_JSON="$tmp_dir/rollback-state.json" \
-      ROLLBACK_TEST_PLAN_JSON="$plan_json" \
-      ROLLBACK_TEST_APPLY_CALLED="$tmp_dir/rollback-apply-called" \
-      ORPHAN_TEST_SCAN_MARKER="$tmp_dir/rollback-orphan-scan-called" \
-      AWS_BIN="$tmp_dir/bin/orphan-aws" \
-      RUNNER_TEMP="$tmp_dir" \
-      GITHUB_STEP_SUMMARY="$tmp_dir/rollback-summary.md" \
-      bash scripts/rollback_partial_apply.sh
-  ) > "$tmp_dir/rollback-$mode.out" 2>&1; then
-    status=0
-  else
-    status=$?
-  fi
-
-  [[ -f "$tmp_dir/rollback-orphan-scan-called" ]] || fail "rollback skipped AWS orphan verification for case $mode"
-
-  case "$mode" in
-    success|output-fail|apply-fail)
-      [[ -f "$tmp_dir/rollback-apply-called" ]] || fail "rollback did not attempt the guarded destroy for case $mode"
-      ;;
-    plan-fail|plan-show-fail|invalid-plan)
-      [[ ! -f "$tmp_dir/rollback-apply-called" ]] || fail "rollback created the terraform apply marker for unvalidated plan case $mode"
-      ;;
-    *)
-      [[ ! -f "$tmp_dir/rollback-apply-called" ]] || fail "rollback applied an unvalidated or unavailable plan for case $mode"
-      ;;
-  esac
-
-  if [[ "$expected" == success ]]; then
-    [[ "$status" -eq 0 ]] || fail "rollback case $mode failed with $status"
-  else
-    [[ "$status" -ne 0 ]] || fail "rollback case $mode unexpectedly succeeded"
-  fi
-}
-
-run_rollback_case success success
-[[ -f "$tmp_dir/rollback-apply-called" ]] || fail 'rollback did not apply its exact guarded plan'
-[[ -f "$tmp_dir/rollback-orphan-scan-called" ]] || fail 'rollback did not verify AWS resources after state cleanup'
-grep -Fq 'Terraform destroy plan deletes exactly the managed resources' "$tmp_dir/rollback-summary.md" || fail 'rollback summary omitted the exact-plan guard result'
-record_critical_branch partial_apply_rollback_uses_exact_saved_destroy_plan
-run_rollback_case state-missing success
-[[ -f "$tmp_dir/rollback-orphan-scan-called" ]] || fail 'rollback treated missing state as success without scanning AWS'
-run_rollback_case empty-state success
-[[ -f "$tmp_dir/rollback-orphan-scan-called" ]] || fail 'rollback treated empty state as success without scanning AWS'
-run_rollback_case output-fail success
-[[ -f "$tmp_dir/rollback-apply-called" ]] || fail 'rollback stopped before destroying managed resources when Terraform outputs were unavailable'
-[[ -f "$tmp_dir/rollback-orphan-scan-called" ]] || fail 'rollback skipped AWS orphan verification when Terraform outputs were unavailable'
-grep -Fq 'Terraform outputs were unavailable; rollback continues with an empty manifest' "$tmp_dir/rollback-summary.md" || fail 'rollback did not record its empty-manifest fallback'
-record_critical_branch partial_apply_rollback_continues_when_outputs_unavailable
-run_rollback_case init-fail failure
-run_rollback_case state-error failure
-run_rollback_case state-show-fail failure
-run_rollback_case plan-fail failure
-run_rollback_case plan-show-fail failure
-run_rollback_case invalid-plan failure "$tmp_dir/rollback-invalid-plan.json"
-run_rollback_case apply-fail failure
-[[ -f "$tmp_dir/rollback-apply-called" ]] || fail 'rollback did not attempt applying its validated plan before reporting failure'
-[[ -f "$tmp_dir/rollback-orphan-scan-called" ]] || fail 'rollback skipped the orphan scan after a failed destroy apply'
-record_critical_branch partial_apply_rollback_verifies_resources_absent_from_state
-
-printf 'PASS: summaries redact plan values and unverified secret resolution fails closed before network access\n'
+  printf 'PASS: summaries redact plan values and unverified secret resolution fails closed before network access\n'

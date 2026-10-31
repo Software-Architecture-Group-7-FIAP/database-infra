@@ -48,21 +48,6 @@ run "declassifies_validated_ssm_subnet_ids_before_for_each" {
   }
 
   override_data {
-    target = data.aws_iam_policy_document.migration_hml_secret_read
-    values = { json = "{\"Version\":\"2012-10-17\",\"Statement\":[]}" }
-  }
-
-  override_data {
-    target = data.aws_iam_policy_document.lambda_hml_secret_read
-    values = { json = "{\"Version\":\"2012-10-17\",\"Statement\":[]}" }
-  }
-
-  override_data {
-    target = data.aws_iam_policy_document.lambda_prd_secret_read
-    values = { json = "{\"Version\":\"2012-10-17\",\"Statement\":[]}" }
-  }
-
-  override_data {
     target = module.network.data.aws_subnet.this["subnet-11111111"]
     values = {
       id                = "subnet-11111111"
@@ -98,5 +83,10 @@ run "declassifies_validated_ssm_subnet_ids_before_for_each" {
   assert {
     condition     = !issensitive(local.isolated_subnet_ids) && toset(local.isolated_subnet_ids) == toset(["subnet-11111111", "subnet-22222222"])
     error_message = "Validated non-secret subnet IDs must be explicitly declassified before they become for_each keys."
+  }
+
+  assert {
+    condition     = length(local.db_names) == 2 && toset(keys(local.db_names)) == toset(["hml", "prd"])
+    error_message = "The shared staging database root must keep the HML and PRD logical databases in its contract."
   }
 }

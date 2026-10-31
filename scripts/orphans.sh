@@ -179,9 +179,15 @@ if [[ -n "$owner_secret_arn" ]]; then
   assert_secret_absent_or_pending 'RDS-managed master secret metadata' "$owner_secret_arn" owner_secret
 fi
 
-assert_named_resource_absent 'bootstrap IAM role' bootstrap_role iam get-role --role-name auto-shop-staging-db-bootstrap
+assert_named_resource_absent 'shared bootstrap IAM role' shared_bootstrap_role iam get-role --role-name auto-shop-staging-db-bootstrap
+for environment in hml prd; do
+  assert_named_resource_absent "$environment bootstrap IAM role" "bootstrap_role_$environment" \
+    iam get-role --role-name "auto-shop-staging-db-bootstrap-$environment"
+done
 for policy_name in \
   auto-shop-staging-db-read-owner \
+  auto-shop-staging-db-bootstrap-hml-secrets \
+  auto-shop-staging-db-bootstrap-prd-secrets \
   auto-shop-staging-db-read-migrations-hml \
   auto-shop-staging-db-read-migrations-prd \
   auto-shop-staging-db-read-lambda-hml \
@@ -200,9 +206,13 @@ cluster_name="$("$jq_bin" -r '.Parameter.Value // empty' "$cluster_json")"
 if ! "$aws_bin" --region "$region" eks describe-cluster --name "$cluster_name" --output json > "$tmp_dir/cluster-description.json" 2> "$tmp_dir/cluster-description.stderr"; then
   fail 'the EKS cluster is unavailable; Pod Identity association cleanup needs operator review'
 fi
-aws_json pod_identity eks list-pod-identity-associations \
-  --cluster-name "$cluster_name" --namespace auto-shop-ops --service-account auto-shop-db-bootstrap
-assert_no_items 'bootstrap Pod Identity association' associations pod_identity
+for environment in shared hml prd; do
+  service_account="auto-shop-db-bootstrap"
+  [[ "$environment" == shared ]] || service_account="${service_account}-$environment"
+  aws_json "pod_identity_$environment" eks list-pod-identity-associations \
+    --cluster-name "$cluster_name" --namespace auto-shop-ops --service-account "$service_account"
+  assert_no_items "$environment bootstrap Pod Identity association" associations "pod_identity_$environment"
+done
 
 output_parameter_names=(
   /auto-shop/staging/database/host
@@ -222,6 +232,8 @@ output_parameter_names=(
   /auto-shop/staging/database/iam/lambda-read-policy-arn/prd
   /auto-shop/staging/database/iam/migrations-hml-read-policy-arn
   /auto-shop/staging/database/iam/migrations-prd-read-policy-arn
+  /auto-shop/staging/database/iam/bootstrap-role-arn/hml
+  /auto-shop/staging/database/iam/bootstrap-role-arn/prd
 )
 if ! capture_ssm_get_parameters_batched \
   "$tmp_dir/output_parameters.json" "$aws_bin" "$region" "$jq_bin" "$tmp_dir" \

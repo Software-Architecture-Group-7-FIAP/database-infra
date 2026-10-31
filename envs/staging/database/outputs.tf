@@ -20,12 +20,12 @@ output "db_names" {
 
 output "runtime_secret_arns" {
   description = "Secret metadata ARNs for hml and prd application runtime credentials."
-  value       = module.secrets.runtime_secret_arns
+  value       = local.runtime_secret_arns
 }
 
 output "lambda_secret_arns" {
   description = "Secret metadata ARNs for hml and prd Lambda credentials."
-  value       = module.secrets.lambda_secret_arns
+  value       = local.lambda_secret_arns
 }
 
 output "owner_secret_arn" {

@@ -35,13 +35,29 @@ case "$*" in
     if [[ "${BOOTSTRAP_AWS_MODE:-success}" == fail-ssm ]]; then
       exit 1
     fi
+    requested_names=()
+    reading_names=false
+    for argument in "$@"; do
+      if [[ "$argument" == --names ]]; then
+        reading_names=true
+        continue
+      fi
+      if [[ "$argument" == --* ]]; then
+        reading_names=false
+      elif [[ "$reading_names" == true ]]; then
+        requested_names+=("$argument")
+      fi
+    done
+    requested_json="$(printf '%s\n' "${requested_names[@]}" | jq -Rsc 'split("\n") | map(select(length > 0))')"
     batch_index="$(<"$BOOTSTRAP_AWS_BATCH_COUNT")"
     printf '%s\n' "$((batch_index + 1))" > "$BOOTSTRAP_AWS_BATCH_COUNT"
-    if [[ "$batch_index" -eq 0 ]]; then
-      jq '.Parameters |= .[0:10]' "$BOOTSTRAP_SSM_FIXTURE"
-    else
-      jq '.Parameters |= .[10:20]' "$BOOTSTRAP_SSM_FIXTURE"
-    fi
+    jq --argjson requested "$requested_json" '
+      . as $fixture |
+      {
+        Parameters: [$fixture.Parameters[] | select(.Name as $name | ($requested | index($name)) != null)],
+        InvalidParameters: [$requested[] as $name | select(any($fixture.Parameters[]; .Name == $name) | not) | $name]
+      }
+    ' "$BOOTSTRAP_SSM_FIXTURE"
     ;;
   'eks update-kubeconfig '*)
     [[ "${BOOTSTRAP_AWS_FAIL_KUBECONFIG:-false}" != true ]]
@@ -57,9 +73,13 @@ cat > "$bin_dir/kubectl" <<'FAKE_KUBECTL'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >> "$BOOTSTRAP_KUBECTL_CALLS"
+environment="${BOOTSTRAP_EXPECTED_ENVIRONMENT:-hml}"
+job_name="auto-shop-db-bootstrap-$environment"
+sql_configmap="auto-shop-db-bootstrap-sql-$environment"
+settings_configmap="auto-shop-db-bootstrap-settings-$environment"
 
 case "$*" in
-  *' get job/auto-shop-db-bootstrap -o json')
+  *" get job/$job_name -o json")
     if [[ "${BOOTSTRAP_KUBECTL_MODE:-success}" == fail-job-status ]]; then
       exit 1
     fi
@@ -69,28 +89,29 @@ case "$*" in
       printf '{"status":{"succeeded":1}}\n'
     fi
     ;;
-  *' delete job/auto-shop-db-bootstrap '*)
+  *" delete job/$job_name "*)
     [[ "${BOOTSTRAP_KUBECTL_MODE:-success}" != fail-delete ]]
     ;;
-  *' create configmap auto-shop-db-bootstrap-sql '*)
+  *" get serviceaccount/auto-shop-db-bootstrap-$environment -o name")
+    [[ "${BOOTSTRAP_KUBECTL_MODE:-success}" != missing-serviceaccount ]] || exit 1
+    printf 'serviceaccount/auto-shop-db-bootstrap-%s\n' "$environment"
+    ;;
+  *" create configmap $sql_configmap "*)
     [[ "${BOOTSTRAP_KUBECTL_MODE:-success}" != fail-sql-configmap ]] || exit 1
     printf 'apiVersion: v1\nkind: ConfigMap\n'
     ;;
-  *' create configmap auto-shop-db-bootstrap-settings '*)
+  *" create configmap $settings_configmap "*)
     [[ "${BOOTSTRAP_KUBECTL_MODE:-success}" != fail-settings-configmap ]] || exit 1
     printf 'apiVersion: v1\nkind: ConfigMap\n'
     ;;
   *'apply -f '*)
-    if [[ "${BOOTSTRAP_KUBECTL_MODE:-success}" == fail-apply && "$*" == *'/service-account.yaml'* ]]; then
-      exit 1
-    fi
     if [[ "${BOOTSTRAP_KUBECTL_MODE:-success}" == fail-sql-configmap-apply && "$*" == *'/sql-configmap.yaml'* ]]; then
       exit 1
     fi
     if [[ "${BOOTSTRAP_KUBECTL_MODE:-success}" == fail-settings-configmap-apply && "$*" == *'/settings-configmap.yaml'* ]]; then
       exit 1
     fi
-    if [[ "${BOOTSTRAP_KUBECTL_MODE:-success}" == fail-job-apply && "$*" == *'/bootstrap/job.yaml'* ]]; then
+    if [[ "${BOOTSTRAP_KUBECTL_MODE:-success}" == fail-job-apply && "$*" == *'/job.yaml'* ]]; then
       exit 1
     fi
     ;;
@@ -114,6 +135,8 @@ cat > "$BOOTSTRAP_SSM_FIXTURE" <<'PARAMETERS'
     {"Name":"/auto-shop/staging/database/secrets/lambda-hml-arn","Type":"String","Value":"arn:aws:secretsmanager:us-east-1:035611741563:secret:auto-shop/staging/hml/lambda-auth-ghi789"},
     {"Name":"/auto-shop/staging/database/secrets/lambda-prd-arn","Type":"String","Value":"arn:aws:secretsmanager:us-east-1:035611741563:secret:auto-shop/staging/prd/lambda-auth-jkl012"},
     {"Name":"/auto-shop/staging/database/secrets/migrations-hml-arn","Type":"String","Value":"arn:aws:secretsmanager:us-east-1:035611741563:secret:auto-shop/staging/hml/migrations-mno345"},
+    {"Name":"/auto-shop/staging/database/iam/bootstrap-role-arn/hml","Type":"String","Value":"arn:aws:iam::035611741563:role/auto-shop/auto-shop-staging-db-bootstrap-hml"},
+    {"Name":"/auto-shop/staging/database/iam/bootstrap-role-arn/prd","Type":"String","Value":"arn:aws:iam::035611741563:role/auto-shop/auto-shop-staging-db-bootstrap-prd"},
     {"Name":"/auto-shop/staging/database/secrets/migrations-prd-arn","Type":"String","Value":"arn:aws:secretsmanager:us-east-1:035611741563:secret:auto-shop/staging/prd/migrations-pqr678"},
     {"Name":"/auto-shop/staging/database/secrets/owner-arn","Type":"String","Value":"arn:aws:secretsmanager:us-east-1:035611741563:secret:rds!db-autoshop-abc123"},
     {"Name":"/auto-shop/staging/eks/cluster-name","Type":"String","Value":"auto-shop-staging"}
@@ -123,7 +146,7 @@ cat > "$BOOTSTRAP_SSM_FIXTURE" <<'PARAMETERS'
 PARAMETERS
 
 : > "$BOOTSTRAP_AWS_BATCH_COUNT"
-PATH="$bin_dir:$PATH" bash "$repo_root/scripts/bootstrap-db.sh" bootstrap > "$tmp_dir/bootstrap.out"
+PATH="$bin_dir:$PATH" bash "$repo_root/scripts/bootstrap-db.sh" bootstrap hml > "$tmp_dir/bootstrap.out"
 grep -Fq 'PASS: database Job phase bootstrap completed' "$tmp_dir/bootstrap.out" \
   || { printf 'FAIL: bootstrap runtime did not complete against local fixtures\n' >&2; exit 1; }
 grep -Fq 'sts get-caller-identity' "$BOOTSTRAP_AWS_CALLS" \
@@ -134,8 +157,24 @@ grep -Fq 'eks update-kubeconfig' "$BOOTSTRAP_AWS_CALLS" \
   || { printf 'FAIL: bootstrap omitted EKS kubeconfig setup\n' >&2; exit 1; }
 grep -Fq 'apply -f ' "$BOOTSTRAP_KUBECTL_CALLS" \
   || { printf 'FAIL: bootstrap omitted applying Kubernetes resources\n' >&2; exit 1; }
-grep -Fq 'delete job/auto-shop-db-bootstrap' "$BOOTSTRAP_KUBECTL_CALLS" \
+grep -Fq 'delete job/auto-shop-db-bootstrap-hml' "$BOOTSTRAP_KUBECTL_CALLS" \
   || fail 'bootstrap cleanup did not delete the temporary job'
+if grep -Fq 'prd' "$BOOTSTRAP_AWS_CALLS" "$BOOTSTRAP_KUBECTL_CALLS"; then
+  fail 'HML bootstrap requested a PRD resource'
+fi
+
+: > "$tmp_dir/aws-prd-batch-count"
+BOOTSTRAP_EXPECTED_ENVIRONMENT=prd BOOTSTRAP_AWS_CALLS="$tmp_dir/aws-prd-calls.log" \
+  BOOTSTRAP_AWS_BATCH_COUNT="$tmp_dir/aws-prd-batch-count" \
+  BOOTSTRAP_KUBECTL_CALLS="$tmp_dir/kubectl-prd-calls.log" PATH="$bin_dir:$PATH" \
+  bash "$repo_root/scripts/bootstrap-db.sh" bootstrap prd > "$tmp_dir/bootstrap-prd.out"
+grep -Fq 'PASS: database Job phase bootstrap completed' "$tmp_dir/bootstrap-prd.out" \
+  || fail 'PRD bootstrap runtime did not complete against local fixtures'
+grep -Fq 'get serviceaccount/auto-shop-db-bootstrap-prd' "$tmp_dir/kubectl-prd-calls.log" \
+  || fail 'PRD bootstrap did not require its selected service account'
+if grep -Fq 'hml' "$tmp_dir/aws-prd-calls.log" "$tmp_dir/kubectl-prd-calls.log"; then
+  fail 'PRD bootstrap requested an HML resource'
+fi
 
 expect_bootstrap_failure() {
   local label="$1"
@@ -154,7 +193,7 @@ expect_bootstrap_failure() {
     BOOTSTRAP_AWS_MODE="$aws_mode" \
     BOOTSTRAP_AWS_FAIL_KUBECONFIG="$fail_kubeconfig" \
     BOOTSTRAP_KUBECTL_MODE="$kubectl_mode" \
-    bash "$repo_root/scripts/bootstrap-db.sh" bootstrap > "$output" 2>&1; then
+    bash "$repo_root/scripts/bootstrap-db.sh" bootstrap hml > "$output" 2>&1; then
     fail "bootstrap unexpectedly accepted $label"
   fi
   if ! grep -Fq "FAIL: $expected" "$output"; then
@@ -201,19 +240,20 @@ expect_invalid_parameter invalid_host /auto-shop/staging/database/host invalid.e
 expect_invalid_parameter invalid_port /auto-shop/staging/database/port 3306 \
   'RDS port metadata is invalid'
 expect_invalid_parameter invalid_database_name /auto-shop/staging/database/names/hml wrong_name \
-  'database names do not match the approved contract'
+  'database name does not match the selected environment contract'
 expect_invalid_parameter invalid_cluster_name /auto-shop/staging/eks/cluster-name 'invalid cluster name' \
   'EKS cluster name metadata is invalid'
 expect_invalid_parameter invalid_runtime_hml_arn /auto-shop/staging/database/secrets/runtime-hml-arn arn:invalid \
-  'hml runtime secret ARN is invalid'
-expect_invalid_parameter invalid_runtime_prd_arn /auto-shop/staging/database/secrets/runtime-prd-arn arn:invalid \
-  'prd runtime secret ARN is invalid'
+  'selected runtime secret ARN is invalid'
 expect_invalid_parameter invalid_lambda_hml_arn /auto-shop/staging/database/secrets/lambda-hml-arn arn:invalid \
-  'hml Lambda secret ARN is invalid'
-expect_invalid_parameter invalid_lambda_prd_arn /auto-shop/staging/database/secrets/lambda-prd-arn arn:invalid \
-  'prd Lambda secret ARN is invalid'
+  'selected Lambda secret ARN is invalid'
 expect_invalid_parameter invalid_owner_arn /auto-shop/staging/database/secrets/owner-arn arn:invalid \
   'RDS owner secret ARN is invalid'
+expect_invalid_parameter invalid_bootstrap_role_arn /auto-shop/staging/database/iam/bootstrap-role-arn/hml arn:invalid \
+  'bootstrap role ARN does not match the selected environment contract'
+expect_invalid_parameter cross_environment_bootstrap_role /auto-shop/staging/database/iam/bootstrap-role-arn/hml \
+  arn:aws:iam::035611741563:role/auto-shop/auto-shop-staging-db-bootstrap-prd \
+  'bootstrap role ARN does not match the selected environment contract'
 
 expect_bootstrap_failure kubeconfig_failure 'EKS kubeconfig setup failed' \
   "$BOOTSTRAP_SSM_FIXTURE" 035611741563 true
@@ -229,8 +269,8 @@ expect_bootstrap_failure sql_configmap_failure 'bootstrap source ConfigMap could
   "$BOOTSTRAP_SSM_FIXTURE" 035611741563 false fail-sql-configmap
 expect_bootstrap_failure settings_configmap_failure 'bootstrap settings ConfigMap could not be rendered' \
   "$BOOTSTRAP_SSM_FIXTURE" 035611741563 false fail-settings-configmap
-expect_bootstrap_failure serviceaccount_apply_failure 'bootstrap ServiceAccount apply failed' \
-  "$BOOTSTRAP_SSM_FIXTURE" 035611741563 false fail-apply
+expect_bootstrap_failure missing_serviceaccount 'the selected environment service account must be provisioned by k8s-infra before database bootstrap' \
+  "$BOOTSTRAP_SSM_FIXTURE" 035611741563 false missing-serviceaccount
 expect_bootstrap_failure sql_configmap_apply_failure 'bootstrap source ConfigMap apply failed' \
   "$BOOTSTRAP_SSM_FIXTURE" 035611741563 false fail-sql-configmap-apply
 expect_bootstrap_failure settings_configmap_apply_failure 'bootstrap settings ConfigMap apply failed' \

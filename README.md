@@ -26,20 +26,32 @@ flowchart LR
   Root --> RDS[(RDS PostgreSQL 16.15)]
   RDS --> HML[(autoshop_hml)]
   RDS --> PRD[(autoshop_prd)]
-  Root --> Secrets[Metadados de 6 secrets de aplicação]
-  Root --> IAM[Role Pod Identity de bootstrap e 4 policies de leitura restrita]
-  Root --> SSM[Contrato database no SSM]
+  Root --> Owner[Role Pod Identity de bootstrap e acesso ao secret owner]
+  Root --> SharedSSM[SSM compartilhado: host, porta, SG e owner]
+  HMLRoot[Root Terraform HML] --> HMLSecrets[Metadados secrets HML]
+  HMLRoot --> HMLPolicies[Policies HML de leitura e bootstrap]
+  HMLRoot --> HMLSSM[SSM HML]
+  PRDRoot[Root Terraform PRD] --> PRDSecrets[Metadados secrets PRD]
+  PRDRoot --> PRDPolicies[Policies PRD de leitura e bootstrap]
+  PRDRoot --> PRDSSM[SSM PRD]
   Bootstrap[Job de bootstrap autorizado] --> RDS
-  Bootstrap --> Secrets
-  SSM --> Apps[auto-shop-system e lambda-auth]
+  Bootstrap --> HMLSecrets
+  Bootstrap --> PRDSecrets
+  SharedSSM --> Apps[auto-shop-system e lambda-auth]
+  HMLSSM --> Apps
+  PRDSSM --> Apps
 ```
 
-`envs/staging/database` é o único root. A rede lê cinco parâmetros exatos do `k8s-infra`; o root publica os endpoints, nomes, ARNs e policies do banco. Não há root `envs/production`, RDS Proxy, provider PostgreSQL, senha em Terraform, nem valor de secret em outputs ou SSM.
+`envs/staging/database` possui somente a rede/RDS compartilhados, a role de bootstrap, o acesso ao secret owner e o contrato SSM comum. `envs/hml/database` e `envs/prd/database` possuem somente os metadados de secrets, policies exatas de leitura/bootstrap e parâmetros SSM do próprio ambiente. O root compartilhado lê cinco parâmetros exatos do `k8s-infra`. `prd` é um database lógico no RDS compartilhado de staging, não um root de RDS de produção. Nenhum root usa `terraform_remote_state`, RDS Proxy, provider PostgreSQL, senhas no Terraform ou valores de secrets em outputs/SSM.
+
+The configuration split is not permission to use the new states yet. Set `DATABASE_INFRA_STATE_HANDOFF_COMPLETE=true` only after the live HML/PRD bindings are moved from the current state to their environment states and the single-owner checks pass. Keep `DATABASE_INFRA_DEPLOYMENT_READY` false until the reviewed least-privilege deployment role is ready. See [database state handoff](.github/database-state-handoff.md).
 
 ## Estrutura
 
 ```text
-envs/staging/database/       # Único root; backend S3 e lockfile
+envs/staging/database/       # Shared RDS/network/bootstrap owner; backend S3
+envs/hml/database/           # HML metadata, policies and SSM; isolated backend state
+envs/prd/database/           # PRD metadata, policies and SSM; isolated backend state
 modules/db-network/          # Subnets isoladas e regras SG referenciadas por SG
 modules/db-instance/         # RDS PostgreSQL efêmero e parameter group
 modules/db-secrets/          # Apenas metadados de Secrets Manager
@@ -49,6 +61,8 @@ scripts/                     # Guard, resumo, smoke, bootstrap e orphan scan
 tests/                       # Terraform mocks, testes SQL e contratos de scripts
 .github/workflows/           # CI, apply e destroy
 ```
+
+As chaves de state são `database-infra/staging/terraform.tfstate`, `database-infra/hml/terraform.tfstate` e `database-infra/prd/terraform.tfstate`. O lifecycle `apply.yml` planeja o root compartilhado e somente o root HML. Bootstrap e smoke recebem explicitamente `hml`, consultam apenas seus contratos e operam somente no database lógico HML. Apply PRD fica desabilitado durante a janela limitada pelo teto de custo HML. Cada ambiente continua com um único state owner; o preflight rejeita bindings de ambiente ainda no state compartilhado ou no state do ambiente incorreto. O teardown remove somente o root de metadados HML ou PRD selecionado e confirma que o RDS compartilhado continua disponível. Uma sessão HML/PRD não autoriza a destruição do RDS compartilhado.
 
 ## Contrato publicado (SSM)
 
@@ -83,6 +97,8 @@ Mapeamento atual dos consumidores:
 
 Os quatro parâmetros `/iam/` publicam ARNs de policies, nunca valores de credenciais. Cada policy de migrations permite ler apenas o secret do respectivo banco. O root não usa `terraform_remote_state`, `GetParametersByPath`, `SecureString` ou um nome singular `database/name`.
 
+Responsabilidade: `database/host`, `database/port`, `database/security-group-id` e `database/secrets/owner-arn` são gerenciados pelo root staging. Cada parâmetro `database/names/<env>`, `database/secrets/<type>-<env>-arn` e `database/iam/*/<env>` é gerenciado pelo root daquele ambiente. Os bindings exatos de HML e PRD precisam ser transferidos do state atual antes que qualquer root de ambiente possa fazer deploy.
+
 O app-runtime não recebe uma policy duplicada neste repositório: o ESO existente no `k8s-infra` já lê `app-runtime-*` dentro do prefixo staging. Esse wildcard de nome é um tradeoff frente ao critério de ARN literal da issue #4 e precisa de revisão entre repositórios.
 
 ## Segredos criados
@@ -99,7 +115,11 @@ O app-runtime não recebe uma policy duplicada neste repositório: o ESO existen
 
 Terraform cria somente metadados dos seis secrets de aplicação; não declara `aws_secretsmanager_secret_version`, não chama `GetSecretValue` e não grava senha em state. Os seis secrets têm recuperação imediata para que o mesmo nome possa ser recriado na próxima sessão. O master secret permanece gerenciado pelo RDS e só é lido pelo Job de bootstrap.
 
+O root staging cria o secret owner gerenciado pelo RDS. Cada root HML/PRD cria somente os metadados de secrets runtime, Lambda e migrations do próprio ambiente. Nenhum root de ambiente possui o RDS/rede compartilhados ou a role de bootstrap.
+
 ## Execução
+
+Os workflows `apply.yml`, `destroy.yml` e o plan manual de `ci.yml` definem `LIFECYCLE_TRIGGERING_ACTOR` com `github.triggering_actor` e rejeitam a execução antes de solicitar credenciais AWS se esse valor não corresponder ao `GITHUB_ACTOR` original. O consumidor repete a validação ao conferir a autorização do ledger; a allowlist e o vínculo entre o ator de origem e o token de dispatch continuam obrigatórios.
 
 A ordem operacional aprovada é:
 
@@ -118,11 +138,12 @@ k8s-infra apply foundation e platform (inclui auto-shop-ops)
 
 O seed não é mantido neste repositório: o `environment-start.yml` de `auto-shop-system` aguarda o workflow de deploy do app, que aplica migrations, executa e espera o Job de seed e só então inicia a aplicação. A reconciliação da borda pública vem depois da conclusão desse deploy. Se migrations ou seed falharem, o coordenador não avança para grants, abertura da borda ou declaração de ambiente saudável.
 
-Apply é manual via `workflow_dispatch` e requer environment `staging` restrito exatamente à branch `main`, `STAGING_ACTIVE=true`, `STAGING_SESSION_AUTHORIZED=true` e `STAGING_SESSION_MODE` correspondente ao modo solicitado. O coordenador envia `session_id`, `started_at`, `session_mode` e um token HMAC-SHA256; o banco valida a assinatura com o secret compartilhado `LIFECYCLE_SESSION_SIGNING_KEY` (mínimo de 32 bytes UTF-8), além do formato, da data e da janela BRT. O token assina exatamente `session_mode|session_id|started_at`, com horário UTC canônico `YYYY-MM-DDTHH:MM:SSZ`. O secret precisa existir no environment `staging` deste repositório, no coordenador e no repositório de Kubernetes; se estiver ausente ou inválido, nenhuma credencial AWS é solicitada. `lifecycle_dispatch_id` obrigatório deve ser um UUID de 32 caracteres hexadecimais minúsculos; ele correlaciona cada chamada remota e é incluído no nome da execução. Dispatches sem esse campo são bloqueados. Push ou merge em `main` não inicia provisionamento. O preflight verifica a conta `035611741563`, a boundary `auto-shop-boundary`, os cinco parâmetros SSM de entrada e o EKS antes do plan/apply.
+Apply é manual via `workflow_dispatch`, aceita somente `session_mode=hml`, e requer o environment `staging` restrito à branch `main`, `STAGING_ACTIVE=true`, `STAGING_SESSION_AUTHORIZED=true` e `STAGING_SESSION_MODE=hml`. A autorização HMAC e `session_token` foram substituídos pelo ledger DynamoDB persistente do coordenador; o dispatch contém `session_id`, `started_at`, `session_mode`, `phase` e o locator público `lifecycle_dispatch_id`. A autorização de uso único vincula o operador de origem, a identidade do token de dispatch entre repositórios, o workflow/ref de destino, o hash dos inputs e a expiração. O consumidor compara o `GITHUB_ACTOR` real ao ator de dispatch gravado no ledger antes de assumir a role Terraform; a allowlist local também precisa conter esse ator. `lifecycle_dispatch_id` deve ser um UUID de 32 caracteres hexadecimais minúsculos e é incluído no nome da execução. Dispatches sem esse campo são bloqueados. O dispatch só é emitido pelo coordenador após seu preflight de custo; o DB workflow não pode ser usado para pular essa autorização. Push ou merge em `main` não inicia provisionamento. O preflight verifica a conta `035611741563`, a boundary `auto-shop-boundary`, os cinco parâmetros SSM de entrada e o EKS antes do plan/apply.
+
+Antes que qualquer apply ou teardown do lifecycle alcance o Terraform, `DATABASE_INFRA_STATE_HANDOFF_COMPLETE` e `DATABASE_INFRA_DEPLOYMENT_READY` precisam ser exatamente `true`, e os inventários dos três states devem passar pelo validador de ownership. Mantenha ambas as flags ausentes/falsas até concluir o runbook e revisar o papel de deployment e seu OIDC trust; assim, a migração inicial dos bindings bloqueia antes de AWS e Terraform. `database-delivery.yml` apenas valida formatação e roots sem backend, credenciais, plan ou apply. Depois de um teardown autorizado, o bootstrap do lifecycle pode criar novamente os recursos de metadados do ambiente em seu state vazio.
 
 Os workflows `apply.yml` e `destroy.yml` consultam o histórico de execuções de ambos antes de pedir credenciais AWS. Um ID repetido, falha da API do GitHub, resposta inválida ou histórico acima do limite de páginas bloqueia o job. A permissão adicional é apenas `actions: read`; re-runs de workflow são bloqueados antes da consulta à API.
 
-`session_token` é transmitido como input de `workflow_dispatch` e fica visível nos metadados do evento; restrinja acesso de leitura às execuções a operadores confiáveis. O token atual não é de uso único. Mantenha as flags de prontidão PRD desligadas até a troca por uma autorização curta e de uso único.
 
 O bootstrap operacional está implementado localmente. O Job usa AWS CLI para obter credenciais temporárias e metadados, um init container Python que executa asm-exec para resolver segredos no runtime, postgres:16 para aplicar SQL por TLS e AWS CLI para publicar somente payloads ausentes ou desatualizados via PutSecretValue. Os retries reutilizam os segredos publicados e reaplicam seus verificadores SCRAM aos roles. Credenciais, pgpass, verificadores SCRAM, payloads, CA e temporários do pod ficam no emptyDir em memória. Os temporários do orquestrador local usam /dev/shm por padrão; em hosts sem tmpfs gravável, `BOOTSTRAP_TMP_BASE` e `BOOTSTRAP_ALLOW_NON_TMPFS_TMP=true` permitem indicar um diretório-base existente, privado e controlado pelo operador. O script cria nele um subdiretório com modo restrito. O host guarda metadados SSM, kubeconfig temporário, manifests renderizados, status do Job e logs de comandos; valores de secrets e credenciais AWS do workload ficam no volume `/work` em memória do Job. O operador é responsável por garantir a privacidade e o controle do diretório-base alternativo. O comando verify valida o bundle e os digests sem chamar a AWS. O asm-exec e o download do CA precisam de saída HTTPS; essa conectividade ainda não foi validada no EKS.
 
@@ -130,17 +151,24 @@ O bootstrap operacional está implementado localmente. O Job usa AWS CLI para ob
 
 ## CI/CD
 
-Em **pull request** para `main`, `ci.yml` roda fmt, validate sem backend, testes mockados dos módulos, TFLint, Checkov, ShellCheck, contrato estático e integração SQL em PostgreSQL 16 — **sem credencial AWS** (alinhado ao cenário 3 da issue #89 / template `infra-ci.yml` do `auto-shop-system`). Após merge, um **push** em `main` dispara `Read-only staging plan` no GitHub Environment `aws-plan`, assumindo `AWS_PLAN_ROLE_ARN` via OIDC; o plan pula se os contratos do `k8s-infra` ou o cluster ainda não existirem. AccessDenied/rede falham em vez de serem tratados como ausência.
+`ci.yml` roda fmt, validate sem backend, testes mockados dos módulos, TFLint, Checkov, ShellCheck, contrato estático, guard de planos e integração SQL em PostgreSQL 16. O plano que acessa o backend não roda em PR: o job de plan só aceita `workflow_dispatch` em `main`, valida o operador antes de solicitar OIDC e usa a role separada `AWS_PLAN_ROLE_ARN`. Ele pula o plan se os contratos do `k8s-infra` ou o cluster ainda não existirem; AccessDenied/rede falham em vez de serem tratados como ausência.
 
-O rollback de apply parcial sempre tenta a varredura read-only de órfãos, inclusive quando Terraform init/state/plan falha. Sem state legível, outputs disponíveis ou plano validado, ele não inicia destroy e retorna falha depois da verificação; se outputs falharem, ainda tenta o destroy exato do state com o plano validado e usa manifesto vazio para a varredura AWS.
+### Isolamento de planos em pull requests
+
+PRs não recebem OIDC, credenciais AWS nem acesso ao backend/state. Eles executam validação com `terraform init -backend=false`, testes com providers mockados, TFLint, Checkov e contratos estáticos. Um plan remoto não é seguro para código ainda não revisado: `terraform init`/plan acessa o state remoto, que deve ser tratado como dado sensível, enquanto providers e data sources processam a configuração do PR durante o plan. Uma aprovação de deployment apenas pausa o job; depois da aprovação, o código do PR ainda executaria com as credenciais e poderia ler o state. `pull_request_target` com checkout do PR tem o mesmo problema de confiança.
+
+O caminho seguro é revisar e integrar a mudança primeiro, então um operador autorizado dispara manualmente o plan de `ci.yml` em `main`. A branch protegida precisa exigir revisão independente antes do merge e impedir bypass; esse requisito não foi alterado por esta implementação. O trust da role de plan deve ser separado da role de apply e limitado a `aud=sts.amazonaws.com` e ao `sub` exato da workflow `ci.yml` em `refs/heads/main`, como preparado em `.github/oidc/plan-trust-policy.json`. A policy de permissões da role deve permitir somente leituras necessárias ao plan e acesso de leitura ao objeto de state, escrita somente no objeto de lock S3 e nenhuma ação de escrita na infraestrutura ou `secretsmanager:GetSecretValue`. A configuração externa da role e da branch protection ainda precisa de revisão independente; não foi alterada aqui.
+
+Essa alternativa mantém o plan remoto manual e pós-merge. O critério de #01 que pede plan remoto em cada PR não deve ser habilitado sem uma mudança explícita no modelo de confiança que permita ao código do PR acessar state/credenciais. A validação em PR permanece automática e sem backend.
+
 
 O job SQL instala o cliente PostgreSQL e kcov v42, executa `tests/shell-coverage.sh` e falha se a cobertura de linhas executáveis em `scripts/` ficar abaixo de 80% ou se qualquer um dos 13 ramos críticos de autorização/sanitização não for exercitado. O resultado é publicado no resumo do job do GitHub Actions.
 
-`apply.yml` só aceita `workflow_dispatch` na branch `main`; requer `session_id`, `started_at`, `session_mode`, prova HMAC e `phase`, usa a role existente `AWS_DEPLOY_ROLE_ARN` e serializa no grupo `staging-database`. Para abrir uma sessão, os gates estáticos do GitHub Environment precisam ser `STAGING_ACTIVE=true`, `STAGING_SESSION_AUTHORIZED=true` e `STAGING_SESSION_MODE` igual ao modo despachado. PRD ainda exige `ENVIRONMENT_SCHEDULE_ENABLED=true`, `PRD_LIFECYCLE_AUTOMATION_READY=true` e `PRD_COST_EXCEPTION_APPROVED=true`; ausentes ou falsos, mantêm a abertura bloqueada. A validação HMAC e da janela acontece antes de solicitar credenciais AWS e novamente imediatamente antes do Terraform apply. Se um apply autorizado começou dentro da janela, ele conclui o bootstrap e o smoke mesmo quando a janela termina durante a operação; isso evita abandonar um banco provisionado sem inicialização. Uma falha ou interrupção depois do início do apply aciona um rollback que gera um novo plano de destroy, compara-o com os endereços gerenciados no state e aplica o mesmo plano validado. Depois, o rollback executa a verificação read-only de órfãos inclusive quando o state não existe ou está vazio; qualquer recurso remoto que não possa ser comprovado ausente faz o rollback falhar para revisão operacional. HML aceita somente sessões com data BRT até 31/10/2026, início entre 07:00–17:00 e operações dentro do bloco de cinco horas. Para `prd-window`, aceita `prd-YYYY-MM-DD` entre 01 e 05/11/2026; `bootstrap` só pode começar entre 06:00–07:00 BRT e `grants` entre 06:00–22:00. O plano de apply é salvo, resumido, validado e aplicado pelo mesmo arquivo; depois de `bootstrap`, executa o smoke `initial`, e `grants` executa o smoke `full` depois das migrations. O nome de execução inclui sessão, fase, operação e `lifecycle_dispatch_id` para correlação pelo coordenador.
+`apply.yml` só aceita `workflow_dispatch` na branch `main` e tem `hml` como modo único; PRD continua desabilitado para apply durante o período do teto de gasto. O fluxo HML exige a autorização de uso único do ledger antes de qualquer acesso Terraform. O coordenador `environment-start` captura evidência recente do Cost Explorer e aplica o guard de gasto bruto projetado de **US$100 até 05/11/2026**, revalidando a evidência antes de autorizar a sessão. Um dispatch manual sem a autorização desse fluxo falha fechado. HML aceita sessões com data BRT até 31/10/2026 e início entre 07:00–17:00; o trabalho dura no máximo cinco horas e o teardown pode continuar até 22:40 BRT. O plano de apply é salvo, resumido, validado e aplicado pelo mesmo arquivo; `bootstrap` executa o smoke `initial`, e `grants` executa o smoke `full` depois das migrations. O nome de execução inclui sessão, fase, operação e `lifecycle_dispatch_id` para correlação pelo coordenador.
 
-`destroy.yml` não tem agendamento próprio: o coordenador deve despachá-lo explicitamente com `session_id`, `started_at`, `session_mode`, prova HMAC e confirmação `destroy`. O teardown usa a prova assinada, janela e confirmação como autorização própria; flags de abertura revogados não impedem a limpeza. O coordenador cancela e aguarda qualquer apply da mesma sessão antes de despachar destroy. Antes de qualquer credencial ou leitura AWS, a validação exige pelo menos 35 minutos até o prazo de término e o job tem timeout de 35 minutos. As etapas anteriores ao plano têm limites que, junto com o timeout de 23 minutos da etapa Terraform, cabem nesse orçamento; a exclusão do RDS está limitada a 18 minutos pelo provider. Uma sessão sem esse tempo restante falha antes do acesso AWS. O workflow revalida a janela antes da limpeza Kubernetes e imediatamente antes do Terraform apply. A janela de mutação PRD é 22:00–22:40; 22:40–22:55 fica reservada à auditoria global somente leitura e 22:55–23:00 ao handoff. O teardown HML também termina antes de 22:40 e respeita o prazo próprio de uma hora de tolerância. Nenhum cancelamento de concorrência é habilitado. Antes do teardown, o workflow guarda em diretório privado o state, o manifesto e o plano binário; um guard compara o JSON do plano com os endereços gerenciados no state e exige somente deleções, cobrindo exatamente esses endereços. Terraform aplica o mesmo arquivo de plano validado, sem executar `terraform destroy` diretamente. Se o EKS já tiver sido removido, o plano usa o snapshot do state com `-refresh=false`. A limpeza dos objetos de bootstrap usa `kubectl` com timeout de 30 segundos; somente falhas de conectividade ao API do EKS podem ser deferidas, pois os objetos são removidos quando o cluster é destruído em seguida. Falhas de autorização, do plano ou do acesso AWS continuam bloqueando a operação, e não há `terraform state rm` automático. A ordenação com o teardown de `k8s-infra` ainda precisa ser demonstrada nos dois ciclos completos. Nenhum cron ou gatilho automático fica habilitado neste repositório.
+`destroy.yml` não tem agendamento e remove somente o root de ambiente selecionado pela sessão HML/PRD validada. O workflow valida os três inventários de state, guarda o state e o plano do ambiente selecionado em diretório privado, rejeita planos com recursos de RDS/rede compartilhados e aplica o mesmo plano salvo. A varredura de órfãos confirma que os metadados do ambiente selecionado foram removidos e que o RDS compartilhado continua disponível. Esse workflow nunca planeja nem destrói `envs/staging/database`; uma futura destruição do RDS compartilhado precisa ser separada e provar primeiro que ambos os states de ambiente estão vazios e todos os consumidores foram encerrados. O teardown também remove os recursos Kubernetes temporários do bootstrap antes de remover o state do ambiente selecionado.
 
-Actions de terceiros são fixadas por SHA. PRs não usam `pull_request_target` com privilégios de deploy. A `main` exige PR, uma aprovação humana, os checks `staging deployment branch policy`, `Terraform and shell checks` e `PostgreSQL permission integration`, conversas resolvidas; force-push e exclusão estão bloqueados. **Não** marque `Read-only staging plan` como required check em PRs (esse job só roda no push pós-merge). O plan read-only valida o estado publicado após cada merge em `main`. O label `breaking-change` é exigido para mudanças contratuais: a CI compara mudanças em Terraform e pede esse label e uma entrada em `CHANGELOG.md` sob `[Unreleased]`.
+Actions de terceiros são fixadas por SHA. PRs não usam `pull_request_target` com privilégios de deploy. A `main` deve exigir PR, os checks `staging deployment branch policy`, `Terraform and shell checks`, `PostgreSQL permission integration` e `Read-only staging plan`, conversas resolvidas e pelo menos uma revisão independente; force-push, bypass e exclusão devem estar bloqueados. O estado real dessa proteção não foi alterado nem verificado por este trabalho. O label `breaking-change` é exigido para mudanças contratuais: a CI compara mudanças em Terraform e pede esse label e uma entrada em `CHANGELOG.md` sob `[Unreleased]`.
 
 ## Custo
 

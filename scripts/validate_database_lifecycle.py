@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
-"""Fail closed unless a protected PRD or HML database session is in-window."""
+"""Fail closed unless a protected HML apply or authorized database teardown is in-window."""
 
 import argparse
-import hashlib
-import hmac
 import os
 import re
 import sys
@@ -16,10 +14,8 @@ FIRST_PRD_DAY = date(2026, 11, 1)
 LAST_PRD_DAY = date(2026, 11, 5)
 LAST_HML_DAY = date(2026, 10, 31)
 STARTED_AT_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
-HML_MAX_SESSION = timedelta(hours=5)
-HML_TEARDOWN_GRACE = timedelta(hours=1)
+MAX_SESSION_DURATION = timedelta(hours=5)
 LIFECYCLE_TEARDOWN_CUTOFF = time(22, 40)
-SESSION_TOKEN_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 
 class LifecycleWindowError(ValueError):
@@ -71,7 +67,7 @@ def _validate_hml_action(
     if action == "start":
         if phase not in {"bootstrap", "grants"}:
             raise LifecycleWindowError("HML apply requires phase bootstrap or grants.")
-        if elapsed >= HML_MAX_SESSION:
+        if elapsed >= MAX_SESSION_DURATION:
             raise LifecycleWindowError("HML apply must finish within five hours of started_at.")
         if phase == "bootstrap":
             local_time = local_now.time().replace(tzinfo=None)
@@ -88,20 +84,17 @@ def _validate_hml_action(
     if confirmation != "destroy":
         raise LifecycleWindowError('The teardown confirmation must be exactly "destroy".')
 
-    teardown_start = started_at + HML_MAX_SESSION
-    teardown_deadline = min(
-        started_at + HML_MAX_SESSION + HML_TEARDOWN_GRACE,
-        datetime.combine(local_now.date(), LIFECYCLE_TEARDOWN_CUTOFF, BRT).astimezone(
-            timezone.utc
-        ),
-    )
+    teardown_start = started_at
+    teardown_deadline = datetime.combine(
+        local_now.date(), LIFECYCLE_TEARDOWN_CUTOFF, BRT
+    ).astimezone(timezone.utc)
     if now < teardown_start or now >= teardown_deadline:
         raise LifecycleWindowError(
-            "HML teardown is allowed from started_at + five hours through one hour of grace, capped at 22:40 BRT."
+            "HML teardown is allowed after the session starts and before the 22:40 BRT same-day cutoff."
         )
     if now + minimum_remaining >= teardown_deadline:
         raise LifecycleWindowError(
-            "HML teardown has insufficient time to finish before its session deadline or 22:40 BRT."
+            "HML teardown has insufficient time to finish before the 22:40 BRT same-day cutoff."
         )
 
 
@@ -128,20 +121,8 @@ def _validate_prd_action(
     ) != time(6, 0):
         raise LifecycleWindowError("PRD started_at must be 06:00 BRT on the session date.")
 
-    local_time = local_now.time().replace(tzinfo=None)
-    if action == "start":
-        if phase not in {"bootstrap", "grants"}:
-            raise LifecycleWindowError("PRD apply requires phase bootstrap or grants.")
-        if phase == "bootstrap" and not time(6, 0) <= local_time < time(7, 0):
-            raise LifecycleWindowError("PRD database bootstrap is allowed only from 06:00 to 07:00 BRT.")
-        if phase == "grants" and not time(6, 0) <= local_time < time(22, 0):
-            raise LifecycleWindowError("PRD database grants are allowed only from 06:00 to 22:00 BRT.")
-        if confirmation:
-            raise LifecycleWindowError("A confirmation value is not valid for the apply operation.")
-        return
-
     if action != "teardown":
-        raise LifecycleWindowError("Unsupported PRD lifecycle action.")
+        raise LifecycleWindowError("PRD database apply is disabled during the HML spend-cap window.")
     if phase:
         raise LifecycleWindowError("A phase value is not valid for the teardown operation.")
     if confirmation != "destroy":
@@ -149,8 +130,8 @@ def _validate_prd_action(
     teardown_deadline = datetime.combine(
         local_now.date(), LIFECYCLE_TEARDOWN_CUTOFF, BRT
     ).astimezone(timezone.utc)
-    if local_time < time(22, 0) or now >= teardown_deadline:
-        raise LifecycleWindowError("PRD database teardown is allowed only from 22:00 to 22:40 BRT.")
+    if now < started_at or now >= teardown_deadline:
+        raise LifecycleWindowError("PRD database teardown is allowed after session start and before the 22:40 BRT same-day cutoff.")
     if now + minimum_remaining >= teardown_deadline:
         raise LifecycleWindowError(
             "PRD teardown has insufficient time to finish before the 22:40 BRT audit cutoff."
@@ -165,7 +146,6 @@ def validate_database_action(
     session_id: str,
     started_at_value: str,
     session_mode: str,
-    session_token: str,
     lifecycle_dispatch_id: str,
     confirmation: str,
     minimum_remaining_seconds: int,
@@ -188,6 +168,8 @@ def validate_database_action(
         raise LifecycleWindowError("session_mode must be hml or prd-window.")
     if not re.fullmatch(r"[0-9a-f]{32}", lifecycle_dispatch_id):
         raise LifecycleWindowError("lifecycle_dispatch_id must be a lowercase 32-character UUID hex value.")
+    if action == "start" and session_mode != "hml":
+        raise LifecycleWindowError("PRD database apply is disabled during the HML spend-cap window.")
 
     if action == "start":
         if environment.get("STAGING_ACTIVE") != "true":
@@ -197,25 +179,7 @@ def validate_database_action(
         if environment.get("STAGING_SESSION_MODE") != session_mode:
             raise LifecycleWindowError("session_mode does not match the protected active session.")
 
-    if session_mode == "prd-window" and action == "start":
-        for gate_name in (
-            "ENVIRONMENT_SCHEDULE_ENABLED",
-            "PRD_LIFECYCLE_AUTOMATION_READY",
-            "PRD_COST_EXCEPTION_APPROVED",
-        ):
-            if environment.get(gate_name) != "true":
-                raise LifecycleWindowError(f"{gate_name} must be true to open a PRD database session.")
-
     started_at = _parse_started_at(started_at_value)
-    signing_key = environment.get("LIFECYCLE_SESSION_SIGNING_KEY", "")
-    if len(signing_key.encode("utf-8")) < 32:
-        raise LifecycleWindowError("LIFECYCLE_SESSION_SIGNING_KEY must contain at least 32 UTF-8 bytes.")
-    if not SESSION_TOKEN_PATTERN.fullmatch(session_token):
-        raise LifecycleWindowError("session_token must be a lowercase 64-character HMAC-SHA256 hex digest.")
-    message = f"{session_mode}|{session_id}|{started_at_value}".encode("utf-8")
-    expected_token = hmac.new(signing_key.encode("utf-8"), message, hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(session_token, expected_token):
-        raise LifecycleWindowError("session_token does not prove a coordinator-authorized session.")
 
     if session_mode == "hml":
         _validate_hml_action(
@@ -246,7 +210,6 @@ def main() -> int:
     parser.add_argument("--session-id", required=True)
     parser.add_argument("--started-at", required=True)
     parser.add_argument("--session-mode", choices=("hml", "prd-window"), required=True)
-    parser.add_argument("--session-token", required=True)
     parser.add_argument("--lifecycle-dispatch-id", default="")
     parser.add_argument("--confirmation", default="")
     parser.add_argument("--minimum-remaining-seconds", type=int, default=0)
@@ -260,7 +223,6 @@ def main() -> int:
             session_id=args.session_id,
             started_at_value=args.started_at,
             session_mode=args.session_mode,
-            session_token=args.session_token,
             lifecycle_dispatch_id=args.lifecycle_dispatch_id,
             confirmation=args.confirmation,
             minimum_remaining_seconds=args.minimum_remaining_seconds,

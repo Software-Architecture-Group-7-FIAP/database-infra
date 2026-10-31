@@ -17,6 +17,9 @@ fail() {
 if [[ "$PHASE" != "bootstrap" ]]; then
   exit 0
 fi
+if [[ "${ENVIRONMENT:-}" != hml && "${ENVIRONMENT:-}" != prd ]]; then
+  fail
+fi
 publish_payload() {
   local key="$1" arn="$2" payload="/work/payload-$1.json"
   [[ -f "$payload" ]] || return 0
@@ -26,9 +29,6 @@ publish_payload() {
     fail
   fi
 }
-publish_payload runtime-hml "$RUNTIME_HML_SECRET_ARN"
-publish_payload runtime-prd "$RUNTIME_PRD_SECRET_ARN"
-publish_payload lambda-hml "$LAMBDA_HML_SECRET_ARN"
-publish_payload lambda-prd "$LAMBDA_PRD_SECRET_ARN"
-publish_payload migrations-hml "$MIGRATIONS_HML_SECRET_ARN"
-publish_payload migrations-prd "$MIGRATIONS_PRD_SECRET_ARN"
+publish_payload "runtime-$ENVIRONMENT" "$RUNTIME_SECRET_ARN"
+publish_payload "lambda-$ENVIRONMENT" "$LAMBDA_SECRET_ARN"
+publish_payload "migrations-$ENVIRONMENT" "$MIGRATIONS_SECRET_ARN"

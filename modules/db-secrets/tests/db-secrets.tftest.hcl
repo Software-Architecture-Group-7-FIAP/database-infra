@@ -63,3 +63,49 @@ run "rejects_unexpected_environment_names" {
 
   expect_failures = [var.environments]
 }
+
+run "accepts_hml_only_environment_scope" {
+  command = plan
+
+  variables {
+    environments = ["hml"]
+  }
+
+  assert {
+    condition     = keys(aws_secretsmanager_secret.runtime) == ["hml"]
+    error_message = "An HML root must be able to own only HML secret metadata."
+  }
+}
+
+run "accepts_prd_only_environment_scope" {
+  command = plan
+
+  variables {
+    environments = ["prd"]
+  }
+
+  assert {
+    condition     = keys(aws_secretsmanager_secret.runtime) == ["prd"]
+    error_message = "A PRD root must be able to own only PRD secret metadata."
+  }
+}
+
+run "rejects_duplicate_environment_names" {
+  command = plan
+
+  variables {
+    environments = ["hml", "hml"]
+  }
+
+  expect_failures = [var.environments]
+}
+
+run "rejects_empty_environment_scope" {
+  command = plan
+
+  variables {
+    environments = []
+  }
+
+  expect_failures = [var.environments]
+}

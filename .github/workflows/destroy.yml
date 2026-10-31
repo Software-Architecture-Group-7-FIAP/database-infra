@@ -18,12 +18,8 @@ on:
         type: choice
         options: [hml, prd-window]
       confirm:
-        description: Type destroy to remove the ephemeral database staging session
+        description: Type destroy to remove the selected HML or PRD environment metadata
         required: true
-        type: string
-      session_token:
-        description: Coordinator-issued HMAC proof for this lifecycle session
-        required: false
         type: string
       lifecycle_dispatch_id:
         description: Unique coordinator dispatch correlation ID
@@ -42,10 +38,11 @@ concurrency:
 env:
   TF_VERSION: 1.15.8
   TF_IN_AUTOMATION: "true"
+  LIFECYCLE_TRIGGERING_ACTOR: ${{ github.triggering_actor }}
 
 jobs:
   destroy:
-    name: destroy ephemeral staging database
+    name: destroy selected database environment
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment: staging
@@ -59,27 +56,29 @@ jobs:
       - name: Validate the protected session and teardown window before requesting AWS credentials
         timeout-minutes: 1
         env:
+          DATABASE_INFRA_STATE_HANDOFF_COMPLETE: ${{ vars.DATABASE_INFRA_STATE_HANDOFF_COMPLETE }}
           STAGING_ACTIVE: ${{ vars.STAGING_ACTIVE }}
           STAGING_SESSION_AUTHORIZED: ${{ vars.STAGING_SESSION_AUTHORIZED }}
           STAGING_SESSION_MODE: ${{ vars.STAGING_SESSION_MODE }}
           ENVIRONMENT_SCHEDULE_ENABLED: ${{ vars.ENVIRONMENT_SCHEDULE_ENABLED }}
           PRD_LIFECYCLE_AUTOMATION_READY: ${{ vars.PRD_LIFECYCLE_AUTOMATION_READY }}
           PRD_COST_EXCEPTION_APPROVED: ${{ vars.PRD_COST_EXCEPTION_APPROVED }}
-          LIFECYCLE_SESSION_SIGNING_KEY: ${{ secrets.LIFECYCLE_SESSION_SIGNING_KEY }}
           REQUESTED_SESSION_ID: ${{ inputs.session_id }}
           REQUESTED_STARTED_AT: ${{ inputs.started_at }}
           REQUESTED_SESSION_MODE: ${{ inputs.session_mode }}
           REQUESTED_CONFIRMATION: ${{ inputs.confirm }}
-          REQUESTED_SESSION_TOKEN: ${{ inputs.session_token }}
           REQUESTED_LIFECYCLE_DISPATCH_ID: ${{ inputs.lifecycle_dispatch_id }}
         run: |
           set -euo pipefail
+          if [[ "$DATABASE_INFRA_STATE_HANDOFF_COMPLETE" != "true" ]]; then
+            echo "::error::Database teardown blocked before AWS credentials: HML/PRD state ownership has not been migrated and verified."
+            exit 1
+          fi
           python3 scripts/validate_database_lifecycle.py \
             --action teardown \
             --session-id "$REQUESTED_SESSION_ID" \
             --started-at "$REQUESTED_STARTED_AT" \
             --session-mode "$REQUESTED_SESSION_MODE" \
-            --session-token "$REQUESTED_SESSION_TOKEN" \
             --lifecycle-dispatch-id "$REQUESTED_LIFECYCLE_DISPATCH_ID" \
             --confirmation "$REQUESTED_CONFIRMATION" \
             --minimum-remaining-seconds 2100
@@ -101,6 +100,43 @@ jobs:
             --api-url "${GITHUB_API_URL:-https://api.github.com}" \
             --token "$GITHUB_TOKEN"
 
+      - name: Validate the lifecycle ledger account configuration
+        timeout-minutes: 1
+        env:
+          EXPECTED_AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          if [[ "$EXPECTED_AWS_ACCOUNT_ID" != "035611741563" ]]; then
+            echo "::error::AWS_ACCOUNT_ID must match the account that owns the lifecycle ledger."
+            exit 1
+          fi
+
+      - name: Require a trusted lifecycle actor before AWS credentials
+        env:
+          LIFECYCLE_TRUSTED_OPERATORS: ${{ vars.LIFECYCLE_TRUSTED_OPERATORS || '' }}
+        run: python3 scripts/require_trusted_lifecycle_operator.py
+
+      - name: Assume the database destroy ledger-consumer role
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        timeout-minutes: 3
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/auto-shop/auto-shop-staging-github-lifecycle-consumer-database-destroy
+          aws-region: us-east-1
+          role-duration-seconds: 900
+
+      - name: Consume the one-use teardown authorization before database AWS access
+        timeout-minutes: 2
+        env:
+          LIFECYCLE_TABLE_NAME: auto-shop-staging-lifecycle-sessions
+          REQUESTED_SESSION_ID: ${{ inputs.session_id }}
+          REQUESTED_LIFECYCLE_DISPATCH_ID: ${{ inputs.lifecycle_dispatch_id }}
+        run: |
+          set -euo pipefail
+          python3 scripts/consume_lifecycle_authorization.py \
+            --action close \
+            --session-id "$REQUESTED_SESSION_ID" \
+            --dispatch-id "$REQUESTED_LIFECYCLE_DISPATCH_ID"
+
       - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
         timeout-minutes: 3
         with:
@@ -114,6 +150,32 @@ jobs:
           aws-region: us-east-1
           role-duration-seconds: 3600
 
+      - name: Verify shared and environment state ownership before teardown
+        timeout-minutes: 8
+        run: |
+          set -euo pipefail
+          umask 077
+          temp_dir="$(mktemp -d "$RUNNER_TEMP/database-state-ownership.XXXXXX")"
+          chmod 700 "$temp_dir"
+          trap 'rm -rf "$temp_dir"' EXIT
+          for entry in staging:envs/staging/database hml:envs/hml/database prd:envs/prd/database; do
+            state_name="${entry%%:*}"
+            state_root="${entry#*:}"
+            if ! terraform -chdir="$state_root" init -input=false -lock-timeout=300s > "$temp_dir/$state_name.init.log" 2>&1; then
+              echo "::error::Terraform could not initialize the $state_name state; teardown was not started."
+              exit 1
+            fi
+            if ! terraform -chdir="$state_root" state list > "$temp_dir/$state_name.list" 2> "$temp_dir/$state_name.stderr"; then
+              echo "::error::The $state_name state is absent or unreadable; teardown was not started."
+              exit 1
+            fi
+          done
+          python3 scripts/validate_database_state_ownership.py \
+            --staging-list "$temp_dir/staging.list" \
+            --hml-list "$temp_dir/hml.list" \
+            --prd-list "$temp_dir/prd.list" \
+            --allow-empty-environments
+
       - name: Remove bootstrap Kubernetes remnants while the cluster exists
         id: upstream
         timeout-minutes: 3
@@ -124,11 +186,10 @@ jobs:
           ENVIRONMENT_SCHEDULE_ENABLED: ${{ vars.ENVIRONMENT_SCHEDULE_ENABLED }}
           PRD_LIFECYCLE_AUTOMATION_READY: ${{ vars.PRD_LIFECYCLE_AUTOMATION_READY }}
           PRD_COST_EXCEPTION_APPROVED: ${{ vars.PRD_COST_EXCEPTION_APPROVED }}
-          LIFECYCLE_SESSION_SIGNING_KEY: ${{ secrets.LIFECYCLE_SESSION_SIGNING_KEY }}
           REQUESTED_SESSION_ID: ${{ inputs.session_id }}
           REQUESTED_STARTED_AT: ${{ inputs.started_at }}
           REQUESTED_SESSION_MODE: ${{ inputs.session_mode }}
-          REQUESTED_SESSION_TOKEN: ${{ inputs.session_token }}
+          REQUESTED_ENVIRONMENT: ${{ inputs.session_mode == 'hml' && 'hml' || 'prd' }}
           REQUESTED_CONFIRMATION: ${{ inputs.confirm }}
           REQUESTED_LIFECYCLE_DISPATCH_ID: ${{ inputs.lifecycle_dispatch_id }}
         run: |
@@ -160,23 +221,41 @@ jobs:
                 --session-id "$REQUESTED_SESSION_ID" \
                 --started-at "$REQUESTED_STARTED_AT" \
                 --session-mode "$REQUESTED_SESSION_MODE" \
-                --session-token "$REQUESTED_SESSION_TOKEN" \
                 --lifecycle-dispatch-id "$REQUESTED_LIFECYCLE_DISPATCH_ID" \
                 --confirmation "$REQUESTED_CONFIRMATION"
-              if kubectl --request-timeout=30s \
+              bootstrap_service_account="auto-shop-db-bootstrap-$REQUESTED_ENVIRONMENT"
+              if ! kubectl --request-timeout=30s \
                 -n auto-shop-ops delete \
-                job/auto-shop-db-bootstrap \
-                configmap/auto-shop-db-bootstrap-sql \
-                configmap/auto-shop-db-bootstrap-settings \
-                serviceaccount/auto-shop-db-bootstrap \
+                "job/auto-shop-db-bootstrap-$REQUESTED_ENVIRONMENT" \
+                "configmap/auto-shop-db-bootstrap-sql-$REQUESTED_ENVIRONMENT" \
+                "configmap/auto-shop-db-bootstrap-settings-$REQUESTED_ENVIRONMENT" \
                 --ignore-not-found > "$temp_dir/kubernetes-cleanup.log" 2>&1; then
-                echo "Bootstrap Kubernetes remnants removed." >> "$GITHUB_STEP_SUMMARY"
-              else
                 python3 scripts/classify_kubernetes_cleanup_failure.py \
                   "$temp_dir/kubernetes-cleanup.log" >> "$GITHUB_STEP_SUMMARY" || true
                 echo "::error::Bootstrap Kubernetes cleanup failed; Terraform destroy remains blocked."
                 exit 1
               fi
+              if ! aws eks list-pod-identity-associations \
+                --cluster-name "$cluster_name" \
+                --namespace auto-shop-ops \
+                --service-account "$bootstrap_service_account" \
+                --output json > "$temp_dir/pod-identity.json" 2> "$temp_dir/pod-identity.stderr"; then
+                echo "::error::The selected environment Pod Identity association could not be checked."
+                exit 1
+              fi
+              if [[ "$(jq -r '.associations | length' "$temp_dir/pod-identity.json")" -ne 0 ]]; then
+                echo "::error::k8s-infra must remove the $bootstrap_service_account Pod Identity association before the database role is destroyed."
+                exit 1
+              fi
+              if kubectl -n auto-shop-ops get "serviceaccount/$bootstrap_service_account" -o name \
+                > "$temp_dir/service-account.txt" 2> "$temp_dir/service-account.stderr"; then
+                echo "::error::k8s-infra must remove ServiceAccount $bootstrap_service_account before database teardown."
+                exit 1
+              elif ! grep -Eq 'NotFound|not found' "$temp_dir/service-account.stderr"; then
+                echo "::error::The selected ServiceAccount could not be verified as absent."
+                exit 1
+              fi
+              echo "Bootstrap Kubernetes remnants removed." >> "$GITHUB_STEP_SUMMARY"
             elif grep -q 'ResourceNotFoundException' "$temp_dir/cluster.stderr"; then
               cluster_present=false
               echo "The upstream EKS cluster is already absent; Kubernetes cleanup is skipped." >> "$GITHUB_STEP_SUMMARY"
@@ -191,24 +270,29 @@ jobs:
       - name: Destroy Terraform root and verify no owned resources remain
         timeout-minutes: 23
         env:
-          UPSTREAM_CLUSTER_PRESENT: ${{ steps.upstream.outputs.cluster_present }}
+          REQUESTED_ENVIRONMENT: ${{ inputs.session_mode == 'hml' && 'hml' || 'prd' }}
           STAGING_ACTIVE: ${{ vars.STAGING_ACTIVE }}
           STAGING_SESSION_AUTHORIZED: ${{ vars.STAGING_SESSION_AUTHORIZED }}
           STAGING_SESSION_MODE: ${{ vars.STAGING_SESSION_MODE }}
           ENVIRONMENT_SCHEDULE_ENABLED: ${{ vars.ENVIRONMENT_SCHEDULE_ENABLED }}
           PRD_LIFECYCLE_AUTOMATION_READY: ${{ vars.PRD_LIFECYCLE_AUTOMATION_READY }}
           PRD_COST_EXCEPTION_APPROVED: ${{ vars.PRD_COST_EXCEPTION_APPROVED }}
-          LIFECYCLE_SESSION_SIGNING_KEY: ${{ secrets.LIFECYCLE_SESSION_SIGNING_KEY }}
           REQUESTED_SESSION_ID: ${{ inputs.session_id }}
           REQUESTED_STARTED_AT: ${{ inputs.started_at }}
           REQUESTED_SESSION_MODE: ${{ inputs.session_mode }}
-          REQUESTED_SESSION_TOKEN: ${{ inputs.session_token }}
           REQUESTED_CONFIRMATION: ${{ inputs.confirm }}
           REQUESTED_LIFECYCLE_DISPATCH_ID: ${{ inputs.lifecycle_dispatch_id }}
         run: |
           set -euo pipefail
           umask 077
-          stack="envs/staging/database"
+          stack="envs/${REQUESTED_ENVIRONMENT}/database"
+          case "$REQUESTED_SESSION_MODE:$REQUESTED_ENVIRONMENT:$stack" in
+            hml:hml:envs/hml/database|prd-window:prd:envs/prd/database) ;;
+            *)
+              echo "::error::Lifecycle mode, environment root, and state ownership do not match."
+              exit 1
+              ;;
+          esac
           temp_dir="$(mktemp -d "$RUNNER_TEMP/database-destroy.XXXXXX")"
           chmod 700 "$temp_dir"
           trap 'rm -rf "$temp_dir"' EXIT
@@ -219,17 +303,14 @@ jobs:
           fi
           if terraform -chdir="$stack" state list > "$temp_dir/state-list.txt" 2> "$temp_dir/state.stderr"; then
             if [[ -s "$temp_dir/state-list.txt" ]]; then
-              if ! terraform -chdir="$stack" output -json > "$temp_dir/outputs.json" 2> "$temp_dir/outputs.stderr"; then
-                echo "::error::Terraform output metadata could not be captured before destroy."
-                exit 1
-              fi
-              cp "$temp_dir/outputs.json" "$temp_dir/manifest.json"
+              printf '{"environment":"%s"}\n' "$REQUESTED_ENVIRONMENT" > "$temp_dir/manifest.json"
               has_resources=true
             else
-              printf '{}\n' > "$temp_dir/manifest.json"
+              printf '{"environment":"%s"}\n' "$REQUESTED_ENVIRONMENT" > "$temp_dir/manifest.json"
             fi
           elif grep -q 'No state file was found' "$temp_dir/state.stderr"; then
-            printf '{}\n' > "$temp_dir/manifest.json"
+            echo "::error::The isolated $REQUESTED_ENVIRONMENT state object is absent; state handoff is incomplete."
+            exit 1
           else
             echo "::error::Terraform state could not be inspected; no destroy was started."
             exit 1
@@ -240,14 +321,7 @@ jobs:
               echo "::error::Terraform could not capture the current state privately; no destroy was started."
               exit 1
             fi
-            plan_args=(plan -destroy -input=false -lock-timeout=300s -out="$temp_dir/destroy.tfplan")
-            if [[ "$UPSTREAM_CLUSTER_PRESENT" == false ]]; then
-              # The previous apply stored the non-secret SSM values in state.
-              # Use that snapshot only to remove the database stack after its
-              # upstream cluster has already been removed.
-              plan_args+=(-refresh=false)
-            fi
-            if ! terraform -chdir="$stack" "${plan_args[@]}" > "$temp_dir/plan.log" 2>&1; then
+            if ! terraform -chdir="$stack" plan -destroy -input=false -lock-timeout=300s -out="$temp_dir/destroy.tfplan" > "$temp_dir/plan.log" 2>&1; then
               echo "::error::Terraform destroy plan failed; private diagnostics were discarded."
               exit 1
             fi
@@ -255,14 +329,13 @@ jobs:
               echo "::error::Terraform could not render the saved destroy plan; no destroy was started."
               exit 1
             fi
-            python3 scripts/validate_destroy_plan.py "$temp_dir/plan.json" "$temp_dir/state.json" >> "$GITHUB_STEP_SUMMARY"
+            python3 scripts/validate_environment_destroy_plan.py "$REQUESTED_ENVIRONMENT" "$temp_dir/plan.json" "$temp_dir/state.json" >> "$GITHUB_STEP_SUMMARY"
             ./scripts/plan-summary.sh "$temp_dir/plan.json" >> "$GITHUB_STEP_SUMMARY"
             python3 scripts/validate_database_lifecycle.py \
               --action teardown \
               --session-id "$REQUESTED_SESSION_ID" \
               --started-at "$REQUESTED_STARTED_AT" \
               --session-mode "$REQUESTED_SESSION_MODE" \
-              --session-token "$REQUESTED_SESSION_TOKEN" \
               --lifecycle-dispatch-id "$REQUESTED_LIFECYCLE_DISPATCH_ID" \
               --confirmation "$REQUESTED_CONFIRMATION"
             if ! terraform -chdir="$stack" apply -input=false -auto-approve -lock-timeout=300s "$temp_dir/destroy.tfplan" > "$temp_dir/destroy.log" 2>&1; then
@@ -271,6 +344,6 @@ jobs:
             fi
             echo "Terraform applied the exact saved destroy plan." >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "No Terraform-managed database resources were found; skipping Terraform destroy." >> "$GITHUB_STEP_SUMMARY"
+            echo "The isolated $REQUESTED_ENVIRONMENT root is empty; no shared Terraform resources were touched." >> "$GITHUB_STEP_SUMMARY"
           fi
-          ./scripts/orphans.sh "$temp_dir/manifest.json" | tee -a "$GITHUB_STEP_SUMMARY"
+          ./scripts/orphans-environment.sh "$REQUESTED_ENVIRONMENT" | tee -a "$GITHUB_STEP_SUMMARY"
