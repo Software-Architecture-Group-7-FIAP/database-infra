@@ -14,8 +14,12 @@ variable "environments" {
   default     = ["hml", "prd"]
 
   validation {
-    condition     = toset(var.environments) == toset(["hml", "prd"]) && length(var.environments) == 2
-    error_message = "Only the hml and prd logical databases are supported."
+    condition = (
+      length(var.environments) > 0 &&
+      length(var.environments) == length(toset(var.environments)) &&
+      alltrue([for environment in var.environments : contains(["hml", "prd"], environment)])
+    )
+    error_message = "environments must contain a unique, non-empty subset of hml and prd."
   }
 }
 

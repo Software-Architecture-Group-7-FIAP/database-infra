@@ -1,0 +1,19 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "GitHubActionsDatabaseReadOnlyPlan",
+      "Effect": "Allow",
+      "Principal": {
+        "Federated": "arn:aws:iam::035611741563:oidc-provider/token.actions.githubusercontent.com"
+      },
+      "Action": "sts:AssumeRoleWithWebIdentity",
+      "Condition": {
+        "StringEquals": {
+          "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+          "token.actions.githubusercontent.com:sub": "repo:Software-Architecture-Group-7-FIAP@279547328/database-infra@1420971567:ref:refs/heads/main:workflow_ref:Software-Architecture-Group-7-FIAP/database-infra/.github/workflows/ci.yml@refs/heads/main"
+        }
+      }
+    }
+  ]
+}

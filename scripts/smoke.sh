@@ -6,23 +6,22 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$script_dir/ssm-get-parameters.sh"
 
 phase=initial
-if [[ $# -gt 1 ]]; then
-  printf 'usage: smoke.sh [initial|full]\n' >&2
+if [[ $# -ne 2 || ( "$2" != hml && "$2" != prd ) ]]; then
+  printf 'usage: smoke.sh <initial|full> <hml|prd>\n' >&2
   exit 64
 fi
-if [[ $# -eq 1 ]]; then
-  phase="$1"
-fi
+phase="$1"
+environment="$2"
 case "$phase" in
   initial) ;;
   full)
-    if ! "$script_dir/bootstrap-db.sh" smoke; then
+    if ! "$script_dir/bootstrap-db.sh" smoke "$environment"; then
       printf 'FAIL: full in-cluster TLS and permission smoke failed\n' >&2
       exit 1
     fi
     ;;
   *)
-    printf 'usage: smoke.sh [initial|full]\n' >&2
+    printf 'usage: smoke.sh <initial|full> <hml|prd>\n' >&2
     exit 64
     ;;
 esac
@@ -69,19 +68,13 @@ required_output_parameters=(
   /auto-shop/staging/database/host
   /auto-shop/staging/database/port
   /auto-shop/staging/database/security-group-id
-  /auto-shop/staging/database/names/hml
-  /auto-shop/staging/database/names/prd
-  /auto-shop/staging/database/secrets/runtime-hml-arn
-  /auto-shop/staging/database/secrets/runtime-prd-arn
-  /auto-shop/staging/database/secrets/lambda-hml-arn
-  /auto-shop/staging/database/secrets/lambda-prd-arn
-  /auto-shop/staging/database/secrets/migrations-hml-arn
-  /auto-shop/staging/database/secrets/migrations-prd-arn
-  /auto-shop/staging/database/secrets/owner-arn
-  /auto-shop/staging/database/iam/lambda-read-policy-arn/hml
-  /auto-shop/staging/database/iam/lambda-read-policy-arn/prd
-  /auto-shop/staging/database/iam/migrations-hml-read-policy-arn
-  /auto-shop/staging/database/iam/migrations-prd-read-policy-arn
+  "/auto-shop/staging/database/names/$environment"
+  "/auto-shop/staging/database/secrets/runtime-$environment-arn"
+  "/auto-shop/staging/database/secrets/lambda-$environment-arn"
+  "/auto-shop/staging/database/secrets/migrations-$environment-arn"
+  "/auto-shop/staging/database/iam/lambda-read-policy-arn/$environment"
+  "/auto-shop/staging/database/iam/migrations-$environment-read-policy-arn"
+  "/auto-shop/staging/database/iam/bootstrap-role-arn/$environment"
 )
 
 if ! capture_ssm_get_parameters_batched \
@@ -90,7 +83,7 @@ if ! capture_ssm_get_parameters_batched \
   fail 'SSM parameter metadata query failed'
 fi
 assert_json 'SSM contract contains exactly the approved plain String parameters' \
-  '(.InvalidParameters | length == 0) and (.Parameters | length == 16) and all(.Parameters[]; .Type == "String" and (.Name | startswith("/auto-shop/staging/database/"))) and all(.Parameters[]; (.Value | test("postgres(ql)?://|password[[:space:]_]*[:=]|database_url|connection_string|dsn[[:space:]_]*[:=]"; "i") | not))' \
+  '(.InvalidParameters | length == 0) and (.Parameters | length == 10) and all(.Parameters[]; .Type == "String" and (.Name | startswith("/auto-shop/staging/database/"))) and all(.Parameters[]; (.Value | test("postgres(ql)?://|password[[:space:]_]*[:=]|database_url|connection_string|dsn[[:space:]_]*[:=]"; "i") | not))' \
   parameters
 
 capture_aws_json instance rds describe-db-instances --db-instance-identifier auto-shop-staging
@@ -138,12 +131,9 @@ done <<< "$subnet_ids"
 [[ "$subnet_index" -ge 2 ]] || fail 'fewer than two isolated subnets were returned'
 
 app_secret_names=(
-  auto-shop/staging/hml/app-runtime
-  auto-shop/staging/prd/app-runtime
-  auto-shop/staging/hml/lambda-auth
-  auto-shop/staging/prd/lambda-auth
-  auto-shop/staging/hml/migrations
-  auto-shop/staging/prd/migrations
+  "auto-shop/staging/$environment/app-runtime"
+  "auto-shop/staging/$environment/lambda-auth"
+  "auto-shop/staging/$environment/migrations"
 )
 secret_index=0
 for secret_name in "${app_secret_names[@]}"; do

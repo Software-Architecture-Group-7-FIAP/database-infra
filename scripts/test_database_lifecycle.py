@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import hashlib
-import hmac
 import unittest
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
@@ -10,13 +8,7 @@ from validate_database_lifecycle import LifecycleWindowError, validate_database_
 
 
 BRT = ZoneInfo("America/Sao_Paulo")
-SIGNING_KEY = "test-key-with-at-least-thirty-two-bytes"
 DISPATCH_ID = "a" * 32
-
-
-def signed_token(session_mode: str, session_id: str, started_at: str) -> str:
-    message = f"{session_mode}|{session_id}|{started_at}".encode("utf-8")
-    return hmac.new(SIGNING_KEY.encode("utf-8"), message, hashlib.sha256).hexdigest()
 
 
 def utc_timestamp(year: int, month: int, day: int, hour: int, minute: int) -> datetime:
@@ -31,7 +23,6 @@ class DatabaseLifecycleValidationTests(unittest.TestCase):
             "STAGING_ACTIVE": "true",
             "STAGING_SESSION_AUTHORIZED": "true",
             "STAGING_SESSION_MODE": session_mode,
-            "LIFECYCLE_SESSION_SIGNING_KEY": SIGNING_KEY,
         }
         if session_mode == "prd-window":
             values.update(
@@ -53,7 +44,6 @@ class DatabaseLifecycleValidationTests(unittest.TestCase):
         started_at: str,
         now: datetime,
         confirmation: str = "",
-        token: str | None = None,
         environment: dict[str, str] | None = None,
         minimum_remaining_seconds: int = 0,
     ) -> None:
@@ -64,7 +54,6 @@ class DatabaseLifecycleValidationTests(unittest.TestCase):
             session_id=session_id,
             started_at_value=started_at,
             session_mode=session_mode,
-            session_token=token or signed_token(session_mode, session_id, started_at),
             lifecycle_dispatch_id=DISPATCH_ID,
             confirmation=confirmation,
             minimum_remaining_seconds=minimum_remaining_seconds,
@@ -92,36 +81,33 @@ class DatabaseLifecycleValidationTests(unittest.TestCase):
             confirmation="destroy",
         )
 
-    def test_accepts_prd_bootstrap_grants_and_teardown_windows(self) -> None:
+    def test_rejects_prd_database_apply_during_the_hml_cap_window(self) -> None:
         start = "2026-11-01T09:00:00Z"
         session_id = "prd-2026-11-01"
-        self.validate(
-            session_mode="prd-window",
-            action="start",
-            phase="bootstrap",
-            session_id=session_id,
-            started_at=start,
-            now=utc_timestamp(2026, 11, 1, 6, 45),
-        )
-        self.validate(
-            session_mode="prd-window",
-            action="start",
-            phase="grants",
-            session_id=session_id,
-            started_at=start,
-            now=utc_timestamp(2026, 11, 1, 21, 59),
-        )
-        self.validate(
-            session_mode="prd-window",
-            action="teardown",
-            phase="",
-            session_id=session_id,
-            started_at=start,
-            now=utc_timestamp(2026, 11, 1, 22, 15),
-            confirmation="destroy",
-        )
+        for phase in ("bootstrap", "grants"):
+            with self.subTest(phase=phase):
+                with self.assertRaisesRegex(LifecycleWindowError, "PRD database apply is disabled"):
+                    self.validate(
+                        session_mode="prd-window",
+                        action="start",
+                        phase=phase,
+                        session_id=session_id,
+                        started_at=start,
+                        now=utc_timestamp(2026, 11, 1, 6, 45),
+                    )
 
-    def test_hml_teardown_requires_time_before_session_and_global_deadlines(self) -> None:
+    def test_prd_grants_after_bootstrap_are_still_disabled(self) -> None:
+        with self.assertRaisesRegex(LifecycleWindowError, "PRD database apply is disabled"):
+            self.validate(
+                session_mode="prd-window",
+                action="start",
+                phase="grants",
+                session_id="prd-2026-11-01",
+                started_at="2026-11-01T09:00:00Z",
+                now=utc_timestamp(2026, 11, 1, 10, 59),
+            )
+
+    def test_hml_teardown_requires_time_before_the_global_cutoff(self) -> None:
         start = "2026-10-29T10:00:00Z"
         session_id = "hml-2026-10-29"
         self.validate(
@@ -130,7 +116,7 @@ class DatabaseLifecycleValidationTests(unittest.TestCase):
             phase="",
             session_id=session_id,
             started_at=start,
-            now=utc_timestamp(2026, 10, 29, 12, 24),
+            now=utc_timestamp(2026, 10, 29, 22, 4),
             confirmation="destroy",
             minimum_remaining_seconds=2100,
         )
@@ -141,7 +127,7 @@ class DatabaseLifecycleValidationTests(unittest.TestCase):
                 phase="",
                 session_id=session_id,
                 started_at=start,
-                now=utc_timestamp(2026, 10, 29, 12, 25),
+                now=utc_timestamp(2026, 10, 29, 22, 5),
                 confirmation="destroy",
                 minimum_remaining_seconds=2100,
             )
@@ -172,7 +158,7 @@ class DatabaseLifecycleValidationTests(unittest.TestCase):
             )
         for minute in (40, 45):
             with self.subTest(minute=minute):
-                with self.assertRaisesRegex(LifecycleWindowError, "22:00 to 22:40"):
+                with self.assertRaisesRegex(LifecycleWindowError, "22:40 BRT same-day cutoff"):
                     self.validate(
                         session_mode="prd-window",
                         action="teardown",
@@ -183,22 +169,11 @@ class DatabaseLifecycleValidationTests(unittest.TestCase):
                         confirmation="destroy",
                     )
 
-    def test_rejects_invalid_signature_and_missing_prd_gate(self) -> None:
+    def test_prd_readiness_flags_cannot_reenable_database_apply(self) -> None:
         start = "2026-11-01T09:00:00Z"
-        with self.assertRaisesRegex(LifecycleWindowError, "does not prove"):
-            self.validate(
-                session_mode="prd-window",
-                action="start",
-                phase="bootstrap",
-                session_id="prd-2026-11-01",
-                started_at=start,
-                now=utc_timestamp(2026, 11, 1, 6, 45),
-                token="0" * 64,
-            )
-
         environment = self.environment("prd-window")
         environment["PRD_COST_EXCEPTION_APPROVED"] = "false"
-        with self.assertRaisesRegex(LifecycleWindowError, "PRD_COST_EXCEPTION_APPROVED"):
+        with self.assertRaisesRegex(LifecycleWindowError, "PRD database apply is disabled"):
             self.validate(
                 session_mode="prd-window",
                 action="start",
@@ -229,8 +204,8 @@ class DatabaseLifecycleValidationTests(unittest.TestCase):
 
         with self.assertRaisesRegex(LifecycleWindowError, "exactly"):
             self.validate(**base, confirmation="remove")
-        with self.assertRaisesRegex(LifecycleWindowError, "22:00 to 22:40"):
-            self.validate(**{**base, "now": utc_timestamp(2026, 11, 1, 21, 59)}, confirmation="destroy")
+        with self.assertRaisesRegex(LifecycleWindowError, "after session start"):
+            self.validate(**{**base, "now": utc_timestamp(2026, 11, 1, 5, 59)}, confirmation="destroy")
 
     def test_teardown_remains_authorized_after_opening_flags_are_revoked(self) -> None:
         environment = self.environment("prd-window")

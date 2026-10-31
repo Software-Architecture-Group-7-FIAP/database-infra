@@ -25,24 +25,41 @@ data "aws_ssm_parameter" "eks_cluster_name" {
   name = "/auto-shop/staging/eks/cluster-name"
 }
 
+data "aws_secretsmanager_secret" "runtime" {
+  for_each = toset(["hml", "prd"])
+
+  name = "auto-shop/staging/${each.value}/app-runtime"
+}
+
+data "aws_secretsmanager_secret" "lambda" {
+  for_each = toset(["hml", "prd"])
+
+  name = "auto-shop/staging/${each.value}/lambda-auth"
+}
+
 locals {
   account_id   = "035611741563"
   partition    = data.aws_partition.current.partition
   cluster_name = data.aws_ssm_parameter.eks_cluster_name.value
   boundary_arn = "arn:${local.partition}:iam::${local.account_id}:policy/auto-shop/auto-shop-boundary"
   cluster_arn  = "arn:${local.partition}:eks:${var.aws_region}:${local.account_id}:cluster/${local.cluster_name}"
-
-  # The provider marks every SSM parameter value sensitive, including this non-secret StringList.
-  # db-network validates the subnet IDs before using them as data-source for_each keys.
+  db_names     = { for environment in ["hml", "prd"] : environment => "autoshop_${environment}" }
+  # AWS marks SSM parameter values sensitive even though this StringList is network metadata.
   isolated_subnet_ids = nonsensitive([
     for subnet_id in split(",", data.aws_ssm_parameter.rds_subnet_ids.value) : trimspace(subnet_id)
   ])
-  db_names = { for environment in var.environments : environment => "autoshop_${environment}" }
   tags = {
     Project     = "auto-shop"
     Repository  = "database-infra"
     Environment = "staging"
     ManagedBy   = "Terraform"
+  }
+
+  runtime_secret_arns = {
+    for environment, secret in data.aws_secretsmanager_secret.runtime : environment => secret.arn
+  }
+  lambda_secret_arns = {
+    for environment, secret in data.aws_secretsmanager_secret.lambda : environment => secret.arn
   }
 }
 
@@ -57,14 +74,6 @@ module "network" {
     lambda    = data.aws_ssm_parameter.lambda_sg_id.value
   }
   tags = local.tags
-}
-
-module "secrets" {
-  source = "../../../modules/db-secrets"
-
-  prefix       = "auto-shop/staging"
-  environments = var.environments
-  tags         = local.tags
 }
 
 module "instance" {
@@ -128,18 +137,6 @@ data "aws_iam_policy_document" "db_bootstrap" {
     actions   = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"]
     resources = [module.instance.master_user_secret_arn]
   }
-
-  statement {
-    sid       = "ReadPublishedApplicationCredentialsForRetry"
-    actions   = ["secretsmanager:GetSecretValue"]
-    resources = concat(values(module.secrets.runtime_secret_arns), values(module.secrets.lambda_secret_arns), values(module.secrets.migration_secret_arns))
-  }
-
-  statement {
-    sid       = "PublishApplicationCredentials"
-    actions   = ["secretsmanager:PutSecretValue", "secretsmanager:DescribeSecret"]
-    resources = concat(values(module.secrets.runtime_secret_arns), values(module.secrets.lambda_secret_arns), values(module.secrets.migration_secret_arns))
-  }
 }
 
 resource "aws_iam_role_policy" "db_bootstrap" {
@@ -155,87 +152,15 @@ resource "aws_eks_pod_identity_association" "db_bootstrap" {
   role_arn        = aws_iam_role.db_bootstrap.arn
 }
 
-data "aws_iam_policy_document" "migration_hml_secret_read" {
-  statement {
-    actions   = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"]
-    resources = [module.secrets.migration_secret_arns["hml"]]
-  }
-}
-
-resource "aws_iam_policy" "migration_hml_secret_read" {
-  name        = "auto-shop-staging-db-read-migrations-hml"
-  path        = "/auto-shop/"
-  description = "Read only the staging hml database migration credential secret."
-  policy      = data.aws_iam_policy_document.migration_hml_secret_read.json
-  tags        = local.tags
-}
-
-data "aws_iam_policy_document" "migration_prd_secret_read" {
-  statement {
-    actions   = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"]
-    resources = [module.secrets.migration_secret_arns["prd"]]
-  }
-}
-
-resource "aws_iam_policy" "migration_prd_secret_read" {
-  name        = "auto-shop-staging-db-read-migrations-prd"
-  path        = "/auto-shop/"
-  description = "Read only the staging prd database migration credential secret."
-  policy      = data.aws_iam_policy_document.migration_prd_secret_read.json
-  tags        = local.tags
-}
-
-data "aws_iam_policy_document" "lambda_hml_secret_read" {
-  statement {
-    actions   = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"]
-    resources = [module.secrets.lambda_secret_arns["hml"]]
-  }
-}
-
-resource "aws_iam_policy" "lambda_hml_secret_read" {
-  name        = "auto-shop-staging-db-read-lambda-hml"
-  path        = "/auto-shop/"
-  description = "Read only the staging hml Lambda credential secret."
-  policy      = data.aws_iam_policy_document.lambda_hml_secret_read.json
-  tags        = local.tags
-}
-
-data "aws_iam_policy_document" "lambda_prd_secret_read" {
-  statement {
-    actions   = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"]
-    resources = [module.secrets.lambda_secret_arns["prd"]]
-  }
-}
-
-resource "aws_iam_policy" "lambda_prd_secret_read" {
-  name        = "auto-shop-staging-db-read-lambda-prd"
-  path        = "/auto-shop/"
-  description = "Read only the staging prd Lambda credential secret."
-  policy      = data.aws_iam_policy_document.lambda_prd_secret_read.json
-  tags        = local.tags
-}
-
 module "ssm_contract" {
   source = "../../../modules/ssm-contract"
 
   prefix = "/auto-shop/staging"
   strings = {
-    "database/host"                               = module.instance.address
-    "database/port"                               = tostring(module.instance.port)
-    "database/security-group-id"                  = module.network.security_group_id
-    "database/names/hml"                          = local.db_names["hml"]
-    "database/names/prd"                          = local.db_names["prd"]
-    "database/secrets/runtime-hml-arn"            = module.secrets.runtime_secret_arns["hml"]
-    "database/secrets/runtime-prd-arn"            = module.secrets.runtime_secret_arns["prd"]
-    "database/secrets/lambda-hml-arn"             = module.secrets.lambda_secret_arns["hml"]
-    "database/secrets/lambda-prd-arn"             = module.secrets.lambda_secret_arns["prd"]
-    "database/secrets/migrations-hml-arn"         = module.secrets.migration_secret_arns["hml"]
-    "database/secrets/migrations-prd-arn"         = module.secrets.migration_secret_arns["prd"]
-    "database/secrets/owner-arn"                  = module.instance.master_user_secret_arn
-    "database/iam/migrations-hml-read-policy-arn" = aws_iam_policy.migration_hml_secret_read.arn
-    "database/iam/migrations-prd-read-policy-arn" = aws_iam_policy.migration_prd_secret_read.arn
-    "database/iam/lambda-read-policy-arn/hml"     = aws_iam_policy.lambda_hml_secret_read.arn
-    "database/iam/lambda-read-policy-arn/prd"     = aws_iam_policy.lambda_prd_secret_read.arn
+    "database/host"              = module.instance.address
+    "database/port"              = tostring(module.instance.port)
+    "database/security-group-id" = module.network.security_group_id
+    "database/secrets/owner-arn" = module.instance.master_user_secret_arn
   }
   tags = local.tags
 }

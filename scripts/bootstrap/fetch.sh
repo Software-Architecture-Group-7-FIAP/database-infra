@@ -10,9 +10,16 @@ export AWS_PAGER=""
 export AWS_CLI_AUTO_PROMPT=off
 mkdir -p /work/home/.aws /work/tmp
 fail() { printf 'bootstrap credential metadata preparation failed\n' >&2; exit 1; }
+[[ "${ENVIRONMENT:-}" == hml || "${ENVIRONMENT:-}" == prd ]] || fail
+expected_role_arn="arn:aws:iam::035611741563:role/auto-shop/auto-shop-staging-db-bootstrap-$ENVIRONMENT"
+[[ "${BOOTSTRAP_ROLE_ARN:-}" == "$expected_role_arn" ]] || fail
 if ! aws configure export-credentials --format process > /work/aws-credentials.json 2> /work/aws-credentials.stderr; then fail; fi
 chmod 600 /work/aws-credentials.json
 if ! jq -e '(.AccessKeyId | type == "string" and length > 0) and (.SecretAccessKey | type == "string" and length > 0) and (.SessionToken | type == "string" and length > 0)' /work/aws-credentials.json >/dev/null 2>&1; then fail; fi
+if ! aws sts get-caller-identity --query Arn --output text > /work/caller-arn.txt 2> /work/caller-arn.stderr; then fail; fi
+expected_caller_prefix="arn:aws:sts::035611741563:assumed-role/auto-shop-staging-db-bootstrap-$ENVIRONMENT/"
+caller_arn="$(cat /work/caller-arn.txt)"
+[[ "$caller_arn" == "$expected_caller_prefix"* && "${caller_arn#"$expected_caller_prefix"}" =~ ^[A-Za-z0-9+=,.@_-]+$ ]] || fail
 printf '{}\n' > /work/secret-state.json
 chmod 600 /work/secret-state.json
 record_secret_state() {
@@ -25,11 +32,8 @@ record_secret_state() {
   chmod 600 /work/secret-state.json
 }
 if [[ "$PHASE" == "bootstrap" ]]; then
-  record_secret_state runtime-hml "$RUNTIME_HML_SECRET_ARN"
-  record_secret_state runtime-prd "$RUNTIME_PRD_SECRET_ARN"
-  record_secret_state lambda-hml "$LAMBDA_HML_SECRET_ARN"
-  record_secret_state lambda-prd "$LAMBDA_PRD_SECRET_ARN"
-  record_secret_state migrations-hml "$MIGRATIONS_HML_SECRET_ARN"
-  record_secret_state migrations-prd "$MIGRATIONS_PRD_SECRET_ARN"
+  record_secret_state "runtime-$ENVIRONMENT" "$RUNTIME_SECRET_ARN"
+  record_secret_state "lambda-$ENVIRONMENT" "$LAMBDA_SECRET_ARN"
+  record_secret_state "migrations-$ENVIRONMENT" "$MIGRATIONS_SECRET_ARN"
 fi
-rm -f /work/aws-credentials.stderr /work/meta-*.stderr
+rm -f /work/aws-credentials.stderr /work/caller-arn.stderr /work/meta-*.stderr

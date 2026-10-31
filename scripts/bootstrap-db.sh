@@ -9,28 +9,41 @@ source "$script_dir/ssm-get-parameters.sh"
 source "$script_dir/private-tmp.sh"
 
 NAMESPACE="auto-shop-ops"
-JOB_NAME="auto-shop-db-bootstrap"
-SQL_CONFIGMAP="auto-shop-db-bootstrap-sql"
-SETTINGS_CONFIGMAP="auto-shop-db-bootstrap-settings"
-SERVICE_ACCOUNT="auto-shop-db-bootstrap"
 ACCOUNT_ID="035611741563"
 region="us-east-1"
 aws_bin=aws
 jq_bin=jq
 kubectl_bin=kubectl
 
-if [[ $# -ne 1 ]]; then
-  printf 'usage: bootstrap-db.sh <verify|bootstrap|grants|smoke>\n' >&2
+if [[ $# -lt 1 || $# -gt 2 ]]; then
+  printf 'usage: bootstrap-db.sh verify | <bootstrap|grants|smoke> <hml|prd>\n' >&2
   exit 64
 fi
 phase="$1"
 case "$phase" in
   verify|bootstrap|grants|smoke) ;;
   *)
-    printf 'usage: bootstrap-db.sh <verify|bootstrap|grants|smoke>\n' >&2
+    printf 'usage: bootstrap-db.sh verify | <bootstrap|grants|smoke> <hml|prd>\n' >&2
     exit 64
     ;;
 esac
+
+if [[ "$phase" == verify ]]; then
+  [[ $# -eq 1 ]] || { printf 'usage: bootstrap-db.sh verify\n' >&2; exit 64; }
+else
+  [[ $# -eq 2 && ( "$2" == hml || "$2" == prd ) ]] || {
+    printf 'usage: bootstrap-db.sh <bootstrap|grants|smoke> <hml|prd>\n' >&2
+    exit 64
+  }
+  environment="$2"
+fi
+
+if [[ "$phase" != verify ]]; then
+  JOB_NAME="auto-shop-db-bootstrap-$environment"
+  SQL_CONFIGMAP="auto-shop-db-bootstrap-sql-$environment"
+  SETTINGS_CONFIGMAP="auto-shop-db-bootstrap-settings-$environment"
+  SERVICE_ACCOUNT="auto-shop-db-bootstrap-$environment"
+fi
 
 fail() {
   printf 'FAIL: %s\n' "$1" >&2
@@ -47,7 +60,6 @@ verify_bundle() {
     "$script_dir/bootstrap/publish.sh" \
     "$script_dir/bootstrap/asm-exec" \
     "$script_dir/bootstrap/job.yaml" \
-    "$script_dir/bootstrap/service-account.yaml" \
     "$repo_root/sql/00-bootstrap.sql" \
     "$repo_root/sql/05-migration-default-privileges.sql" \
     "$repo_root/sql/10-lambda-grants.sql"; do
@@ -92,7 +104,7 @@ cleanup() {
   if [[ "$kubectl_ready" == true ]]; then
     "$kubectl_bin" -n "$NAMESPACE" delete \
       "job/$JOB_NAME" "configmap/$SQL_CONFIGMAP" "configmap/$SETTINGS_CONFIGMAP" \
-      "serviceaccount/$SERVICE_ACCOUNT" --ignore-not-found --wait=true --timeout=60s \
+      --ignore-not-found --wait=true --timeout=60s \
       >"$tmp_dir/cleanup.stdout" 2>"$tmp_dir/cleanup.stderr" || true
   fi
   rm -rf "$tmp_dir"
@@ -103,14 +115,11 @@ trap cleanup EXIT
 required_parameters=(
   /auto-shop/staging/database/host
   /auto-shop/staging/database/port
-  /auto-shop/staging/database/names/hml
-  /auto-shop/staging/database/names/prd
-  /auto-shop/staging/database/secrets/runtime-hml-arn
-  /auto-shop/staging/database/secrets/runtime-prd-arn
-  /auto-shop/staging/database/secrets/lambda-hml-arn
-  /auto-shop/staging/database/secrets/lambda-prd-arn
-  /auto-shop/staging/database/secrets/migrations-hml-arn
-  /auto-shop/staging/database/secrets/migrations-prd-arn
+  "/auto-shop/staging/database/names/$environment"
+  "/auto-shop/staging/database/secrets/runtime-$environment-arn"
+  "/auto-shop/staging/database/secrets/lambda-$environment-arn"
+  "/auto-shop/staging/database/secrets/migrations-$environment-arn"
+  "/auto-shop/staging/database/iam/bootstrap-role-arn/$environment"
   /auto-shop/staging/database/secrets/owner-arn
   /auto-shop/staging/eks/cluster-name
 )
@@ -127,7 +136,7 @@ if ! capture_ssm_get_parameters_batched \
   fail 'database SSM metadata query failed'
 fi
 if ! "$jq_bin" -e \
-  '(.InvalidParameters | length == 0) and (.Parameters | length == 12) and all(.Parameters[]; .Type == "String")' \
+  '(.InvalidParameters | length == 0) and (.Parameters | length == 9) and all(.Parameters[]; .Type == "String")' \
   "$tmp_dir/parameters.json" >/dev/null 2>&1; then
   parameter_count="$("$jq_bin" '.Parameters | length' "$tmp_dir/parameters.json")"
   invalid_parameters="$("$jq_bin" -r '(.InvalidParameters // []) | join(",")' "$tmp_dir/parameters.json")"
@@ -143,14 +152,11 @@ parameter_value() {
 
 if ! db_host="$(parameter_value /auto-shop/staging/database/host)" \
   || ! db_port="$(parameter_value /auto-shop/staging/database/port)" \
-  || ! db_name_hml="$(parameter_value /auto-shop/staging/database/names/hml)" \
-  || ! db_name_prd="$(parameter_value /auto-shop/staging/database/names/prd)" \
-  || ! runtime_hml_arn="$(parameter_value /auto-shop/staging/database/secrets/runtime-hml-arn)" \
-  || ! runtime_prd_arn="$(parameter_value /auto-shop/staging/database/secrets/runtime-prd-arn)" \
-  || ! lambda_hml_arn="$(parameter_value /auto-shop/staging/database/secrets/lambda-hml-arn)" \
-  || ! lambda_prd_arn="$(parameter_value /auto-shop/staging/database/secrets/lambda-prd-arn)" \
-  || ! migrations_hml_arn="$(parameter_value /auto-shop/staging/database/secrets/migrations-hml-arn)" \
-  || ! migrations_prd_arn="$(parameter_value /auto-shop/staging/database/secrets/migrations-prd-arn)" \
+  || ! db_name="$(parameter_value "/auto-shop/staging/database/names/$environment")" \
+  || ! runtime_arn="$(parameter_value "/auto-shop/staging/database/secrets/runtime-$environment-arn")" \
+  || ! lambda_arn="$(parameter_value "/auto-shop/staging/database/secrets/lambda-$environment-arn")" \
+  || ! migrations_arn="$(parameter_value "/auto-shop/staging/database/secrets/migrations-$environment-arn")" \
+  || ! bootstrap_role_arn="$(parameter_value "/auto-shop/staging/database/iam/bootstrap-role-arn/$environment")" \
   || ! owner_secret_arn="$(parameter_value /auto-shop/staging/database/secrets/owner-arn)" \
   || ! cluster_name="$(parameter_value /auto-shop/staging/eks/cluster-name)"; then
   fail 'database SSM metadata could not be parsed'
@@ -158,24 +164,21 @@ fi
 
 [[ "$db_host" =~ ^[a-z0-9][a-z0-9.-]*\.us-east-1\.rds\.amazonaws\.com$ ]] || fail 'RDS endpoint metadata is invalid'
 [[ "$db_port" == "5432" ]] || fail 'RDS port metadata is invalid'
-[[ "$db_name_hml" == "autoshop_hml" && "$db_name_prd" == "autoshop_prd" ]] || fail 'database names do not match the approved contract'
+[[ "$db_name" == "autoshop_$environment" ]] || fail 'database name does not match the selected environment contract'
 [[ "$cluster_name" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$ ]] || fail 'EKS cluster name metadata is invalid'
-[[ "$runtime_hml_arn" =~ ^arn:aws:secretsmanager:us-east-1:035611741563:secret:auto-shop/staging/hml/app-runtime-[A-Za-z0-9]{6}$ ]] || fail 'hml runtime secret ARN is invalid'
-[[ "$runtime_prd_arn" =~ ^arn:aws:secretsmanager:us-east-1:035611741563:secret:auto-shop/staging/prd/app-runtime-[A-Za-z0-9]{6}$ ]] || fail 'prd runtime secret ARN is invalid'
-[[ "$lambda_hml_arn" =~ ^arn:aws:secretsmanager:us-east-1:035611741563:secret:auto-shop/staging/hml/lambda-auth-[A-Za-z0-9]{6}$ ]] || fail 'hml Lambda secret ARN is invalid'
-[[ "$lambda_prd_arn" =~ ^arn:aws:secretsmanager:us-east-1:035611741563:secret:auto-shop/staging/prd/lambda-auth-[A-Za-z0-9]{6}$ ]] || fail 'prd Lambda secret ARN is invalid'
-[[ "$migrations_hml_arn" =~ ^arn:aws:secretsmanager:us-east-1:035611741563:secret:auto-shop/staging/hml/migrations-[A-Za-z0-9]{6}$ ]] || fail 'hml migrations secret ARN is invalid'
-[[ "$migrations_prd_arn" =~ ^arn:aws:secretsmanager:us-east-1:035611741563:secret:auto-shop/staging/prd/migrations-[A-Za-z0-9]{6}$ ]] || fail 'prd migrations secret ARN is invalid'
+[[ "$runtime_arn" =~ ^arn:aws:secretsmanager:us-east-1:035611741563:secret:auto-shop/staging/$environment/app-runtime-[A-Za-z0-9]{6}$ ]] || fail 'selected runtime secret ARN is invalid'
+[[ "$lambda_arn" =~ ^arn:aws:secretsmanager:us-east-1:035611741563:secret:auto-shop/staging/$environment/lambda-auth-[A-Za-z0-9]{6}$ ]] || fail 'selected Lambda secret ARN is invalid'
+[[ "$migrations_arn" =~ ^arn:aws:secretsmanager:us-east-1:035611741563:secret:auto-shop/staging/$environment/migrations-[A-Za-z0-9]{6}$ ]] || fail 'selected migrations secret ARN is invalid'
 [[ "$owner_secret_arn" =~ ^arn:aws:secretsmanager:us-east-1:035611741563:secret:rds\!db-[A-Za-z0-9-]+-[A-Za-z0-9]{6}$ ]] || fail 'RDS owner secret ARN is invalid'
+expected_role_arn="arn:aws:iam::$ACCOUNT_ID:role/auto-shop/auto-shop-staging-db-bootstrap-$environment"
+[[ "$bootstrap_role_arn" == "$expected_role_arn" ]] || fail 'bootstrap role ARN does not match the selected environment contract'
 
 settings_file="$tmp_dir/settings.env"
 {
-  printf 'PHASE=%s\nAWS_REGION=%s\nDB_HOST=%s\nDB_PORT=%s\nDB_NAME_HML=%s\nDB_NAME_PRD=%s\n' \
-    "$phase" "$region" "$db_host" "$db_port" "$db_name_hml" "$db_name_prd"
-  printf 'OWNER_SECRET_ARN=%s\nRUNTIME_HML_SECRET_ARN=%s\nRUNTIME_PRD_SECRET_ARN=%s\n' \
-    "$owner_secret_arn" "$runtime_hml_arn" "$runtime_prd_arn"
-  printf 'LAMBDA_HML_SECRET_ARN=%s\nLAMBDA_PRD_SECRET_ARN=%s\n' "$lambda_hml_arn" "$lambda_prd_arn"
-  printf 'MIGRATIONS_HML_SECRET_ARN=%s\nMIGRATIONS_PRD_SECRET_ARN=%s\n' "$migrations_hml_arn" "$migrations_prd_arn"
+  printf 'PHASE=%s\nENVIRONMENT=%s\nAWS_REGION=%s\nDB_HOST=%s\nDB_PORT=%s\nDB_NAME=%s\n' \
+    "$phase" "$environment" "$region" "$db_host" "$db_port" "$db_name"
+  printf 'OWNER_SECRET_ARN=%s\nBOOTSTRAP_ROLE_ARN=%s\nRUNTIME_SECRET_ARN=%s\nLAMBDA_SECRET_ARN=%s\nMIGRATIONS_SECRET_ARN=%s\n' \
+    "$owner_secret_arn" "$bootstrap_role_arn" "$runtime_arn" "$lambda_arn" "$migrations_arn"
   printf 'ASM_EXEC_MCP_TIMEOUT=30\nPYTHONDONTWRITEBYTECODE=1\nTMPDIR=/work/tmp\n'
 } >"$settings_file"
 chmod 600 "$settings_file"
@@ -189,9 +192,14 @@ kubectl_ready=true
 
 if ! "$kubectl_bin" -n "$NAMESPACE" delete \
   "job/$JOB_NAME" "configmap/$SQL_CONFIGMAP" "configmap/$SETTINGS_CONFIGMAP" \
-  "serviceaccount/$SERVICE_ACCOUNT" --ignore-not-found --wait=true --timeout=60s \
+  --ignore-not-found --wait=true --timeout=60s \
   >"$tmp_dir/previous-resources.stdout" 2>"$tmp_dir/previous-resources.stderr"; then
   fail 'stale bootstrap Kubernetes resources could not be removed'
+fi
+
+if ! "$kubectl_bin" -n "$NAMESPACE" get "serviceaccount/$SERVICE_ACCOUNT" -o name \
+  >"$tmp_dir/serviceaccount.txt" 2>"$tmp_dir/serviceaccount.stderr"; then
+  fail 'the selected environment service account must be provisioned by k8s-infra before database bootstrap'
 fi
 
 if ! "$kubectl_bin" -n "$NAMESPACE" create configmap "$SQL_CONFIGMAP" \
@@ -212,11 +220,6 @@ if ! "$kubectl_bin" -n "$NAMESPACE" create configmap "$SETTINGS_CONFIGMAP" \
   >"$tmp_dir/settings-configmap.yaml" 2>"$tmp_dir/settings-configmap.stderr"; then
   fail 'bootstrap settings ConfigMap could not be rendered'
 fi
-if ! "$kubectl_bin" apply -f "$script_dir/bootstrap/service-account.yaml" \
-  >"$tmp_dir/serviceaccount.stdout" 2>"$tmp_dir/serviceaccount.stderr"; then
-  IFS= read -r apply_error <"$tmp_dir/serviceaccount.stderr" || true
-  fail "bootstrap ServiceAccount apply failed: ${apply_error:-kubectl returned no diagnostic}"
-fi
 if ! "$kubectl_bin" apply -f "$tmp_dir/sql-configmap.yaml" \
   >"$tmp_dir/sql-configmap-apply.stdout" 2>"$tmp_dir/sql-configmap-apply.stderr"; then
   IFS= read -r apply_error <"$tmp_dir/sql-configmap-apply.stderr" || true
@@ -227,7 +230,10 @@ if ! "$kubectl_bin" apply -f "$tmp_dir/settings-configmap.yaml" \
   IFS= read -r apply_error <"$tmp_dir/settings-configmap-apply.stderr" || true
   fail "bootstrap settings ConfigMap apply failed: ${apply_error:-kubectl returned no diagnostic}"
 fi
-if ! "$kubectl_bin" apply -f "$script_dir/bootstrap/job.yaml" \
+if ! sed "s/{{ENVIRONMENT}}/$environment/g" "$script_dir/bootstrap/job.yaml" > "$tmp_dir/job.yaml"; then
+  fail 'environment-scoped bootstrap Job could not be rendered'
+fi
+if ! "$kubectl_bin" apply -f "$tmp_dir/job.yaml" \
   >"$tmp_dir/job-apply.stdout" 2>"$tmp_dir/job-apply.stderr"; then
   fail 'bootstrap Job could not be applied'
 fi

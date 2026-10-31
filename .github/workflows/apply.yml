@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       session_id:
-        description: Active session identifier, hml-YYYY-MM-DD or prd-YYYY-MM-DD
+        description: Active HML session identifier, hml-YYYY-MM-DD
         required: true
         type: string
       started_at:
@@ -13,19 +13,15 @@ on:
         required: true
         type: string
       session_mode:
-        description: Explicitly authorized HML or PRD session mode
+        description: HML only during the capped HML lifecycle window
         required: true
         type: choice
-        options: [hml, prd-window]
+        options: [hml]
       phase:
         description: Bootstrap credentials before migrations, or apply the Lambda grants after migrations
         required: true
         type: choice
         options: [bootstrap, grants]
-      session_token:
-        description: Coordinator-issued HMAC proof for this lifecycle session
-        required: false
-        type: string
       lifecycle_dispatch_id:
         description: Unique coordinator dispatch correlation ID
         required: true
@@ -43,11 +39,12 @@ concurrency:
 env:
   TF_VERSION: 1.15.8
   TF_IN_AUTOMATION: "true"
+  LIFECYCLE_TRIGGERING_ACTOR: ${{ github.triggering_actor }}
 
 jobs:
   apply:
-    name: apply ephemeral staging database
-    if: github.ref == 'refs/heads/main'
+    name: apply authorized HML database lifecycle
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.session_mode == 'hml'
     runs-on: ubuntu-latest
     environment: staging
     timeout-minutes: 90
@@ -60,27 +57,31 @@ jobs:
       - name: Validate the protected session and apply window before requesting AWS credentials
         timeout-minutes: 2
         env:
+          DATABASE_INFRA_STATE_HANDOFF_COMPLETE: ${{ vars.DATABASE_INFRA_STATE_HANDOFF_COMPLETE }}
+          DATABASE_INFRA_DEPLOYMENT_READY: ${{ vars.DATABASE_INFRA_DEPLOYMENT_READY }}
           STAGING_ACTIVE: ${{ vars.STAGING_ACTIVE }}
           STAGING_SESSION_AUTHORIZED: ${{ vars.STAGING_SESSION_AUTHORIZED }}
           STAGING_SESSION_MODE: ${{ vars.STAGING_SESSION_MODE }}
-          ENVIRONMENT_SCHEDULE_ENABLED: ${{ vars.ENVIRONMENT_SCHEDULE_ENABLED }}
-          PRD_LIFECYCLE_AUTOMATION_READY: ${{ vars.PRD_LIFECYCLE_AUTOMATION_READY }}
-          PRD_COST_EXCEPTION_APPROVED: ${{ vars.PRD_COST_EXCEPTION_APPROVED }}
-          LIFECYCLE_SESSION_SIGNING_KEY: ${{ secrets.LIFECYCLE_SESSION_SIGNING_KEY }}
           REQUESTED_SESSION_ID: ${{ inputs.session_id }}
           REQUESTED_STARTED_AT: ${{ inputs.started_at }}
           REQUESTED_SESSION_MODE: ${{ inputs.session_mode }}
           REQUESTED_PHASE: ${{ inputs.phase }}
-          REQUESTED_SESSION_TOKEN: ${{ inputs.session_token }}
           REQUESTED_LIFECYCLE_DISPATCH_ID: ${{ inputs.lifecycle_dispatch_id }}
         run: |
           set -euo pipefail
+          if [[ "$DATABASE_INFRA_STATE_HANDOFF_COMPLETE" != "true" ]]; then
+            echo "::error::Database lifecycle blocked before AWS credentials: HML/PRD state ownership has not been migrated and verified."
+            exit 1
+          fi
+          if [[ "$DATABASE_INFRA_DEPLOYMENT_READY" != "true" ]]; then
+            echo "::error::Database lifecycle blocked before AWS credentials: the reviewed deployment role and OIDC trust are not ready."
+            exit 1
+          fi
           python3 scripts/validate_database_lifecycle.py \
             --action start \
             --session-id "$REQUESTED_SESSION_ID" \
             --started-at "$REQUESTED_STARTED_AT" \
             --session-mode "$REQUESTED_SESSION_MODE" \
-            --session-token "$REQUESTED_SESSION_TOKEN" \
             --lifecycle-dispatch-id "$REQUESTED_LIFECYCLE_DISPATCH_ID" \
             --phase "$REQUESTED_PHASE"
 
@@ -101,6 +102,43 @@ jobs:
             --api-url "${GITHUB_API_URL:-https://api.github.com}" \
             --token "$GITHUB_TOKEN"
 
+      - name: Validate the lifecycle ledger account configuration
+        timeout-minutes: 1
+        env:
+          EXPECTED_AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          if [[ "$EXPECTED_AWS_ACCOUNT_ID" != "035611741563" ]]; then
+            echo "::error::AWS_ACCOUNT_ID must match the account that owns the lifecycle ledger."
+            exit 1
+          fi
+
+      - name: Require a trusted lifecycle actor before AWS credentials
+        env:
+          LIFECYCLE_TRUSTED_OPERATORS: ${{ vars.LIFECYCLE_TRUSTED_OPERATORS || '' }}
+        run: python3 scripts/require_trusted_lifecycle_operator.py
+
+      - name: Assume the database apply ledger-consumer role
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        timeout-minutes: 3
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/auto-shop/auto-shop-staging-github-lifecycle-consumer-database-apply
+          aws-region: us-east-1
+          role-duration-seconds: 900
+
+      - name: Consume the one-use opening authorization before database AWS access
+        timeout-minutes: 2
+        env:
+          LIFECYCLE_TABLE_NAME: auto-shop-staging-lifecycle-sessions
+          REQUESTED_SESSION_ID: ${{ inputs.session_id }}
+          REQUESTED_LIFECYCLE_DISPATCH_ID: ${{ inputs.lifecycle_dispatch_id }}
+        run: |
+          set -euo pipefail
+          python3 scripts/consume_lifecycle_authorization.py \
+            --action open \
+            --session-id "$REQUESTED_SESSION_ID" \
+            --dispatch-id "$REQUESTED_LIFECYCLE_DISPATCH_ID"
+
       - name: Validate the pinned bootstrap bundle before OIDC
         timeout-minutes: 1
         run: ./scripts/bootstrap-db.sh verify
@@ -117,6 +155,35 @@ jobs:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           aws-region: us-east-1
           role-duration-seconds: 3600
+
+      - name: Verify shared and environment state ownership before planning
+        timeout-minutes: 8
+        run: |
+          set -euo pipefail
+          umask 077
+          temp_dir="$(mktemp -d "$RUNNER_TEMP/database-state-ownership.XXXXXX")"
+          chmod 700 "$temp_dir"
+          trap 'rm -rf "$temp_dir"' EXIT
+          for entry in staging:envs/staging/database hml:envs/hml/database prd:envs/prd/database; do
+            state_name="${entry%%:*}"
+            state_root="${entry#*:}"
+            if ! terraform -chdir="$state_root" init -input=false -lock-timeout=300s > "$temp_dir/$state_name.init.log" 2>&1; then
+              echo "::error::Terraform could not initialize the $state_name state; no plan was started."
+              exit 1
+            fi
+            if ! terraform -chdir="$state_root" state list > "$temp_dir/$state_name.list" 2> "$temp_dir/$state_name.stderr"; then
+              echo "::error::The $state_name state is absent or unreadable; no plan was started."
+              exit 1
+            fi
+          done
+          python3 scripts/validate_database_state_ownership.py \
+            --staging-list "$temp_dir/staging.list" \
+            --hml-list "$temp_dir/hml.list" \
+            --prd-list "$temp_dir/prd.list" \
+            --allow-empty-environments
+          python3 scripts/validate_database_state_ownership.py \
+            --environment hml \
+            --state-list "$temp_dir/hml.list"
 
       - name: Preflight boundary, account, SSM, and EKS contracts
         timeout-minutes: 5
@@ -167,17 +234,13 @@ jobs:
         timeout-minutes: 28
         env:
           PHASE: ${{ inputs.phase || 'bootstrap' }}
+          TARGET_ENVIRONMENT: hml
           STAGING_ACTIVE: ${{ vars.STAGING_ACTIVE }}
           STAGING_SESSION_AUTHORIZED: ${{ vars.STAGING_SESSION_AUTHORIZED }}
           STAGING_SESSION_MODE: ${{ vars.STAGING_SESSION_MODE }}
-          ENVIRONMENT_SCHEDULE_ENABLED: ${{ vars.ENVIRONMENT_SCHEDULE_ENABLED }}
-          PRD_LIFECYCLE_AUTOMATION_READY: ${{ vars.PRD_LIFECYCLE_AUTOMATION_READY }}
-          PRD_COST_EXCEPTION_APPROVED: ${{ vars.PRD_COST_EXCEPTION_APPROVED }}
-          LIFECYCLE_SESSION_SIGNING_KEY: ${{ secrets.LIFECYCLE_SESSION_SIGNING_KEY }}
           REQUESTED_SESSION_ID: ${{ inputs.session_id }}
           REQUESTED_STARTED_AT: ${{ inputs.started_at }}
           REQUESTED_SESSION_MODE: ${{ inputs.session_mode }}
-          REQUESTED_SESSION_TOKEN: ${{ inputs.session_token }}
           REQUESTED_LIFECYCLE_DISPATCH_ID: ${{ inputs.lifecycle_dispatch_id }}
         run: |
           set -euo pipefail
@@ -190,12 +253,20 @@ jobs:
             echo "::error::Terraform init failed; private diagnostics were discarded."
             exit 1
           fi
+          # The staging root owns the shared RDS. A failed HML/PRD session must
+          # never trigger automatic cleanup of that shared database.
+          rollback_safe=false
+          echo "rollback_safe=$rollback_safe" >> "$GITHUB_OUTPUT"
           if ! terraform -chdir="$stack" plan -input=false -lock-timeout=300s -out="$temp_dir/plan.tfplan" > "$temp_dir/plan.log" 2>&1; then
             echo "::error::Terraform plan failed; private diagnostics were discarded."
             exit 1
           fi
           if ! terraform -chdir="$stack" show -json "$temp_dir/plan.tfplan" > "$temp_dir/plan.json" 2> "$temp_dir/show.stderr"; then
             echo "::error::Terraform could not produce the guarded plan JSON."
+            exit 1
+          fi
+          if jq -e 'any((.resource_changes // [])[]; ((.change.actions // []) | index("delete")) != null)' "$temp_dir/plan.json" > /dev/null; then
+            echo "::error::The shared staging plan contains a deletion or replacement; no change was applied."
             exit 1
           fi
           ./scripts/plan-summary.sh "$temp_dir/plan.json" >> "$GITHUB_STEP_SUMMARY"
@@ -205,7 +276,6 @@ jobs:
             --session-id "$REQUESTED_SESSION_ID" \
             --started-at "$REQUESTED_STARTED_AT" \
             --session-mode "$REQUESTED_SESSION_MODE" \
-            --session-token "$REQUESTED_SESSION_TOKEN" \
             --lifecycle-dispatch-id "$REQUESTED_LIFECYCLE_DISPATCH_ID" \
             --phase "$PHASE"
           echo "apply_started=true" >> "$GITHUB_OUTPUT"
@@ -214,18 +284,73 @@ jobs:
             exit 1
           fi
           echo "Terraform apply completed from the guarded saved plan." >> "$GITHUB_STEP_SUMMARY"
+
+          environment_root="envs/$TARGET_ENVIRONMENT/database"
+          root_temp_dir="$temp_dir/$TARGET_ENVIRONMENT"
+          mkdir -m 700 "$root_temp_dir"
+          if ! terraform -chdir="$environment_root" init -input=false -lock-timeout=300s > "$root_temp_dir/init.log" 2>&1; then
+            echo "::error::Terraform init failed for ${environment_root}; private diagnostics were discarded."
+            exit 1
+          fi
+          if ! terraform -chdir="$environment_root" plan -input=false -lock-timeout=300s -out="$root_temp_dir/plan.tfplan" > "$root_temp_dir/plan.log" 2>&1; then
+            echo "::error::Terraform plan failed for ${environment_root}; private diagnostics were discarded."
+            exit 1
+          fi
+          if ! terraform -chdir="$environment_root" show -json "$root_temp_dir/plan.tfplan" > "$root_temp_dir/plan.json" 2> "$root_temp_dir/show.stderr"; then
+            echo "::error::Terraform could not render the ${environment_root} plan."
+            exit 1
+          fi
+          if jq -e 'any((.resource_changes // [])[]; ((.change.actions // []) | index("delete")) != null)' "$root_temp_dir/plan.json" > /dev/null; then
+            echo "::error::The ${environment_root} plan contains a deletion or replacement; no change was applied."
+            exit 1
+          fi
+          ./scripts/plan-summary.sh "$root_temp_dir/plan.json" >> "$GITHUB_STEP_SUMMARY"
+          ./scripts/plan-guard.sh "$root_temp_dir/plan.json" >> "$GITHUB_STEP_SUMMARY"
+          if ! terraform -chdir="$environment_root" apply -input=false -auto-approve -lock-timeout=300s "$root_temp_dir/plan.tfplan" > "$root_temp_dir/apply.log" 2>&1; then
+            echo "::error::Terraform apply failed for ${environment_root}; private diagnostics were discarded."
+            exit 1
+          fi
+          echo "Terraform applied the guarded ${environment_root} plan." >> "$GITHUB_STEP_SUMMARY"
+
           echo "The session authorization was checked immediately before apply; this accepted apply and its bootstrap phase may finish after the start window closes." >> "$GITHUB_STEP_SUMMARY"
-          ./scripts/bootstrap-db.sh "$PHASE"
+          ./scripts/bootstrap-db.sh "$PHASE" "$TARGET_ENVIRONMENT"
           if [[ "$PHASE" == "bootstrap" ]]; then
-            ./scripts/smoke.sh initial | tee -a "$GITHUB_STEP_SUMMARY"
+            ./scripts/smoke.sh initial "$TARGET_ENVIRONMENT" | tee -a "$GITHUB_STEP_SUMMARY"
           else
-            ./scripts/smoke.sh full | tee -a "$GITHUB_STEP_SUMMARY"
+            ./scripts/smoke.sh full "$TARGET_ENVIRONMENT" | tee -a "$GITHUB_STEP_SUMMARY"
           fi
 
       - name: Roll back managed resources after a failed or interrupted database apply
         if: >-
           always() &&
           steps.database_apply.outputs.apply_started == 'true' &&
-          steps.database_apply.outcome != 'success'
+          steps.database_apply.outcome != 'success' &&
+          steps.database_apply.outputs.rollback_safe == 'true'
         timeout-minutes: 35
+        env:
+          PHASE: ${{ inputs.phase }}
+          DATABASE_PARTIAL_ROLLBACK_SAFE: ${{ steps.database_apply.outputs.rollback_safe }}
         run: bash scripts/rollback_partial_apply.sh
+
+      - name: Preserve database state after an unsafe bootstrap rollback
+        if: >-
+          always() &&
+          inputs.phase == 'bootstrap' &&
+          steps.database_apply.outputs.apply_started == 'true' &&
+          steps.database_apply.outcome != 'success' &&
+          steps.database_apply.outputs.rollback_safe != 'true'
+        timeout-minutes: 1
+        run: |
+          set -euo pipefail
+          echo "Terraform state existed before bootstrap or could not be proven empty; database resources, data, and backups were retained without automatic destroy." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Preserve database state after a grants-phase failure
+        if: >-
+          always() &&
+          inputs.phase == 'grants' &&
+          steps.database_apply.outcome != 'success'
+        timeout-minutes: 1
+        run: |
+          set -euo pipefail
+          echo "The database state was retained because the grants phase runs after application migrations; no Terraform destroy was attempted." >> "$GITHUB_STEP_SUMMARY"
+          echo "The release workflow must stop promotion and handle any application rollback against its recorded image digest." >> "$GITHUB_STEP_SUMMARY"
