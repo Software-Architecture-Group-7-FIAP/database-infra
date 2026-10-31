@@ -24,7 +24,7 @@ env:
 
 jobs:
   environment-policy:
-    name: GitHub environment branch policies
+    name: staging deployment branch policy
     runs-on: ubuntu-latest
     permissions:
       actions: read
