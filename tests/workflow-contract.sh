@@ -11,7 +11,7 @@ fail() {
   exit 1
 }
 
-for file in ci.yml apply.yml destroy.yml database-delivery.yml; do
+for file in ci.yml apply.yml destroy.yml; do
   [[ -f "$workflows/$file" ]] || fail "missing workflow: $file"
 done
 
@@ -20,7 +20,9 @@ if rg -n 'pull_request_target' "$workflows"; then
 fi
 
 grep -Fq 'branches: [main]' "$workflows/ci.yml" || fail 'CI must run for pull requests to main'
-grep -Fq 'environment-policy:' "$workflows/ci.yml" || fail 'CI must assert the staging deployment branch policy'
+grep -Fq 'environment-policy:' "$workflows/ci.yml" || fail 'CI must assert protected environment branch policies'
+grep -Fq 'require_main_only_environment staging' "$workflows/ci.yml" || fail 'lifecycle environment must allow only main'
+grep -Fq 'require_main_only_environment aws-plan' "$workflows/ci.yml" || fail 'plan environment must allow only main'
 grep -Fq 'id-token: write' "$workflows/ci.yml" || fail 'read-only plan job must use OIDC'
 grep -Fq "if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'" "$workflows/ci.yml" \
   || fail 'state-backed plans must remain manual and restricted to main'
@@ -30,6 +32,13 @@ if sed -n '/^  static:/,/^  plan:/p' "$workflows/ci.yml" \
   | rg -n 'id-token: write|aws-actions/configure-aws-credentials@|terraform[^\n]*[[:space:]]plan([[:space:]]|$)'; then
   fail 'PR static and SQL CI jobs must not receive AWS credentials or run a state-backed plan'
 fi
+plan_job="$(sed -n '/^  plan:/,$p' "$workflows/ci.yml")"
+grep -Fq 'environment: aws-plan' <<< "$plan_job" || fail 'read-only plan must use the isolated aws-plan environment'
+grep -Fq 'needs: [static, sql, environment-policy]' "$workflows/ci.yml" || fail 'plan must wait for static, SQL, and environment branch policy checks'
+[[ "$(grep -Fc 'id-token: write' "$workflows/ci.yml")" -eq 1 ]] || fail 'only the manual plan job may request an OIDC token'
+if [[ -f "$workflows/database-delivery.yml" ]] && rg -n 'id-token: write|role-to-assume|AWS_DEPLOY_ROLE_ARN|AWS_PLAN_ROLE_ARN' "$workflows/database-delivery.yml"; then
+  fail 'static database-delivery workflow must not have AWS role trust'
+fi
 grep -Fq 'The PR plan requirement in issue #01 remains a deliberate security exception' \
   "$repo_root/.github/database-delivery.md" \
   || fail 'database delivery docs must explain why state-backed PR plans remain disabled'
@@ -37,9 +46,9 @@ grep -Fq 'independent review and merge to protected `main`' "$repo_root/.github/
   || fail 'database delivery docs must specify the reviewed post-merge plan path'
 grep -Fq '"token.actions.githubusercontent.com:aud": "sts.amazonaws.com"' \
   "$repo_root/.github/oidc/plan-trust-policy.json" || fail 'plan OIDC trust must pin its audience'
-grep -Fq 'repo:Software-Architecture-Group-7-FIAP@279547328/database-infra@1420971567:ref:refs/heads/main:workflow_ref:Software-Architecture-Group-7-FIAP/database-infra/.github/workflows/ci.yml@refs/heads/main' \
+grep -Fq 'repo:Software-Architecture-Group-7-FIAP@279547328/database-infra@1420971567:environment:aws-plan' \
   "$repo_root/.github/oidc/plan-trust-policy.json" \
-  || fail 'plan OIDC trust must bind the immutable repository, CI workflow, and main ref'
+  || fail 'plan OIDC trust must bind the immutable repository and aws-plan environment'
 grep -Fq './scripts/plan-guard.sh' "$workflows/ci.yml" || fail 'CI plan must use the plan guard'
 grep -Fq 'services:' "$workflows/ci.yml" || fail 'SQL CI must use an ephemeral PostgreSQL service'
 grep -Fq 'postgres:16-alpine' "$workflows/ci.yml" || fail 'SQL CI must pin PostgreSQL 16 Alpine'
