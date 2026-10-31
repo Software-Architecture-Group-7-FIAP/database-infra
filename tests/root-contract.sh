@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2016
+# This file greps for literal Terraform/Markdown text containing '$'; single quotes are intentional.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -13,16 +15,16 @@ fail() {
 
 for root in "$staging_root" "$hml_root" "$prd_root"; do
   for file in main.tf variables.tf outputs.tf versions.tf; do
-    [[ -f "$root/$file" ]] || fail "missing root Terraform file: ${root#$repo_root/}/$file"
+    [[ -f "$root/$file" ]] || fail "missing root Terraform file: ${root#"$repo_root"/}/$file"
   done
   grep -Fq 'required_version = ">= 1.10.0, < 2.0.0"' "$root/versions.tf" \
-    || fail "Terraform version range is missing from ${root#$repo_root/}"
+    || fail "Terraform version range is missing from ${root#"$repo_root"/}"
   rg -q 'version[[:space:]]*=[[:space:]]*"~> 6\.70"' "$root/versions.tf" \
-    || fail "AWS provider version constraint is missing from ${root#$repo_root/}"
+    || fail "AWS provider version constraint is missing from ${root#"$repo_root"/}"
   grep -Fq 'bucket       = "auto-shop-tfstate-035611741563-use1"' "$root/versions.tf" \
-    || fail "state bucket contract changed in ${root#$repo_root/}"
+    || fail "state bucket contract changed in ${root#"$repo_root"/}"
   grep -Fq 'use_lockfile = true' "$root/versions.tf" \
-    || fail "S3 native state locking is missing from ${root#$repo_root/}"
+    || fail "S3 native state locking is missing from ${root#"$repo_root"/}"
 done
 
 [[ ! -d "$repo_root/envs/production" ]] || fail 'production RDS Terraform root is prohibited'

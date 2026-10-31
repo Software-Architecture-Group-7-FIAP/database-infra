@@ -49,6 +49,7 @@ if ! "$aws_bin" iam list-attached-role-policies --role-name auto-shop-staging-db
   fail 'shared bootstrap role attachments could not be checked'
 fi
 for policy_arn in "${policy_arns[@]}"; do
+  # shellcheck disable=SC2016 # The jq variable must remain literal for jq.
   if "$jq_bin" -e --arg policy_arn "$policy_arn" \
     'any(.AttachedPolicies[]?; .PolicyArn == $policy_arn)' "$tmp_dir/attachments.json" >/dev/null; then
     fail "environment policy is still attached to the shared bootstrap role: $policy_arn"
@@ -85,6 +86,7 @@ if ! "$aws_bin" --region "$region" ssm get-parameters --names "${ssm_names[@]}" 
   --output json > "$tmp_dir/parameters.json" 2> "$tmp_dir/parameters.stderr"; then
   fail 'environment SSM metadata query failed'
 fi
+# shellcheck disable=SC2016 # The jq variable must remain literal for jq.
 if ! "$jq_bin" -e --argjson expected "${#ssm_names[@]}" \
   '(.Parameters | length == 0) and (.InvalidParameters | length == $expected)' \
   "$tmp_dir/parameters.json" >/dev/null; then

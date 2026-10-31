@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2016
+# This file greps for literal YAML/Markdown text containing '$'; single quotes are intentional.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -151,12 +153,11 @@ grep -Fq ':environment:staging:workflow_ref:Software-Architecture-Group-7-FIAP/d
 if [[ -e "$repo_root/.github/oidc/production-trust-policy.json" ]]; then
   fail 'PRD OIDC trust must remain disabled during the HML spend-cap window'
 fi
-for policy in "$repo_root/.github/oidc/hml-trust-policy.json"; do
-  grep -Fq '"token.actions.githubusercontent.com:aud": "sts.amazonaws.com"' "$policy" || fail 'AWS OIDC trust must require the standard audience'
-  if rg -n 'token\.actions\.githubusercontent\.com:(workflow|workflow_ref|ref|job_workflow_ref)' "$policy"; then
-    fail 'AWS OIDC trust must bind standard workflow metadata through sub, not unsupported separate claims'
-  fi
-done
+hml_trust_policy="$repo_root/.github/oidc/hml-trust-policy.json"
+grep -Fq '"token.actions.githubusercontent.com:aud": "sts.amazonaws.com"' "$hml_trust_policy" || fail 'AWS OIDC trust must require the standard audience'
+if rg -n 'token\.actions\.githubusercontent\.com:(workflow|workflow_ref|ref|job_workflow_ref)' "$hml_trust_policy"; then
+  fail 'AWS OIDC trust must bind standard workflow metadata through sub, not unsupported separate claims'
+fi
 grep -Fq '"include_claim_keys":["repo","context","workflow_ref"]' "$repo_root/.github/database-delivery.md" || fail 'OIDC runbook must specify the exact repository subject customization template'
 grep -Fq 'US$100 cap through 05/11/2026' "$repo_root/.github/database-delivery.md" || fail 'database apply runbook must bind authorization to the capped lifecycle window'
 
