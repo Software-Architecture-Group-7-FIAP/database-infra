@@ -2,6 +2,8 @@
 
 Provisiona uma única instância PostgreSQL efêmera para o staging do Auto Shop. Os ambientes lógicos `hml` e `prd` são databases separados na mesma instância; `prd` não é um root de produção. O desenho segue o ADR-0071, revisão de 2026-10-25, e as issues #1–#5.
 
+Decisões relacionadas no repositório `auto-shop-system`: [RFC-0002](https://github.com/Software-Architecture-Group-7-FIAP/auto-shop-system/blob/develop/docs/rfc/RFC-0002-banco-postgresql-rds.md) (escolha do PostgreSQL/RDS, com justificativa e modelo ER) e [ADR-0071](https://github.com/Software-Architecture-Group-7-FIAP/auto-shop-system/blob/develop/docs/architecture/decisions/ADR-0071-infraestrutura-cloud-fase-3.md) (topologia dos quatro repositórios).
+
 ## Repositórios
 
 | Repositório | Responsabilidade nesta integração |
