@@ -158,6 +158,8 @@ case "$arguments" in
     fi
     case "${ORPHAN_TEST_TAG_MODE:-empty}" in
       empty) printf '{"ResourceTagMappingList":[]}\n' ;;
+      missing) printf '{}\n' ;;
+      null) printf '{"ResourceTagMappingList":null}\n' ;;
       present) printf '{"ResourceTagMappingList":[{"ResourceARN":"arn:aws:rds:us-east-1:035611741563:db:orphan"}]}\n' ;;
       query-error)
         printf 'AccessDeniedException: resource metadata query denied\n' >&2
@@ -167,7 +169,19 @@ case "$arguments" in
     esac
     ;;
   *"rds describe-db-instances"*) printf 'DBInstanceNotFound: no such staging instance\n' >&2; exit 255 ;;
-  *"rds describe-db-snapshots"*) printf '{"DBSnapshots":[]}\n' ;;
+  *"rds describe-db-snapshots"*)
+    if [[ "$arguments" == *"--snapshot-type manual"* ]]; then
+      snapshot_mode="${ORPHAN_TEST_MANUAL_SNAPSHOT_MODE:-empty}"
+    else
+      snapshot_mode="${ORPHAN_TEST_AUTOMATED_SNAPSHOT_MODE:-empty}"
+    fi
+    case "$snapshot_mode" in
+      empty) printf '{"DBSnapshots":[]}\n' ;;
+      missing) printf '{}\n' ;;
+      null) printf '{"DBSnapshots":null}\n' ;;
+      *) printf 'unexpected RDS snapshot mode\n' >&2; exit 97 ;;
+    esac
+    ;;
   *"rds describe-db-instance-automated-backups"*)
     case "${ORPHAN_TEST_AUTOMATED_BACKUP_MODE:-empty}" in
       empty) printf '{"DBInstanceAutomatedBackups":[]}\n' ;;
@@ -238,7 +252,14 @@ case "$arguments" in
     ;;
   *"ssm get-parameter --name"*) printf '{"Parameter":{"Value":"auto-shop-staging"}}\n' ;;
   *"eks describe-cluster"*) printf '{"cluster":{"name":"auto-shop-staging"}}\n' ;;
-  *"eks list-pod-identity-associations"*) printf '{"associations":[]}\n' ;;
+  *"eks list-pod-identity-associations"*)
+    case "${ORPHAN_TEST_POD_IDENTITY_MODE:-empty}" in
+      empty) printf '{"associations":[]}\n' ;;
+      missing) printf '{}\n' ;;
+      null) printf '{"associations":null}\n' ;;
+      *) printf 'unexpected Pod Identity mode\n' >&2; exit 97 ;;
+    esac
+    ;;
   *"ssm get-parameters"*)
     requested_name_count=0
     reading_names=false
@@ -255,11 +276,20 @@ case "$arguments" in
     done
     [[ "$requested_name_count" -le 10 ]] || { printf 'ValidationException: GetParameters accepts at most 10 names\n' >&2; exit 254; }
     printf '%s\n' "$requested_name_count" >> "$ORCHESTRATION_TEST_SSM_BATCH_LOG"
-    if [[ "${ORPHAN_TEST_LEGACY_SSM_MODE:-absent}" == present && "$arguments" == *"/database/iam/owner-read-policy-arn"* ]]; then
-      printf '{"Parameters":[{"Name":"/auto-shop/staging/database/iam/owner-read-policy-arn"}],"InvalidParameters":[]}\n'
-    else
-      printf '{"Parameters":[],"InvalidParameters":[]}\n'
-    fi
+    case "${ORPHAN_TEST_SSM_RESPONSE_MODE:-normal}" in
+      missing-parameters) printf '{"InvalidParameters":[]}\n' ;;
+      null-parameters) printf '{"Parameters":null,"InvalidParameters":[]}\n' ;;
+      missing-invalid-parameters) printf '{"Parameters":[]}\n' ;;
+      null-invalid-parameters) printf '{"Parameters":[],"InvalidParameters":null}\n' ;;
+      normal)
+        if [[ "${ORPHAN_TEST_LEGACY_SSM_MODE:-absent}" == present && "$arguments" == *"/database/iam/owner-read-policy-arn"* ]]; then
+          printf '{"Parameters":[{"Name":"/auto-shop/staging/database/iam/owner-read-policy-arn"}],"InvalidParameters":[]}\n'
+        else
+          printf '{"Parameters":[],"InvalidParameters":[]}\n'
+        fi
+        ;;
+      *) printf 'unexpected SSM response mode\n' >&2; exit 97 ;;
+    esac
     ;;
   *) printf 'unexpected AWS metadata command\n' >&2; exit 97 ;;
 esac
@@ -304,6 +334,59 @@ cmp -s "$tmp_dir/expected-orphan-ssm-batches.log" "$tmp_dir/orphans-batches.log"
 if grep -Fq 'CANARY_SECRET_VALUE' "$tmp_dir/orphans.out"; then
   fail 'orphan scan leaked a canary value'
 fi
+
+run_malformed_orphan_list_case() {
+  local variable="$1"
+  local mode="$2"
+  local label="$3"
+  local output="$tmp_dir/orphans-malformed-${variable}-${mode}.out"
+
+  if env "$variable=$mode" \
+    ORCHESTRATION_TEST_SSM_BATCH_LOG="$tmp_dir/orphans-malformed-${variable}-${mode}-batches.log" \
+    AWS_BIN="$tmp_dir/bin/orphan-aws" \
+    bash "$repo_root/scripts/orphans.sh" "$tmp_dir/manifest.json" > "$output" 2>&1; then
+    fail "orphan scan accepted a malformed $label response ($mode)"
+  else
+    local status=$?
+    [[ "$status" -eq 1 ]] || fail "malformed $label response ($mode) returned $status instead of a closed failure"
+    grep -Fq "FAIL: orphan detected or ownership query incomplete: $label" "$output" \
+      || fail "orphan scan did not fail closed on malformed $label response ($mode)"
+  fi
+}
+
+for response_mode in missing null; do
+  run_malformed_orphan_list_case ORPHAN_TEST_TAG_MODE "$response_mode" \
+    'all tagged database-infra resources'
+  run_malformed_orphan_list_case ORPHAN_TEST_MANUAL_SNAPSHOT_MODE "$response_mode" \
+    'manual RDS snapshots'
+  run_malformed_orphan_list_case ORPHAN_TEST_AUTOMATED_SNAPSHOT_MODE "$response_mode" \
+    'automated RDS snapshots'
+  run_malformed_orphan_list_case ORPHAN_TEST_POD_IDENTITY_MODE "$response_mode" \
+    'bootstrap Pod Identity association'
+done
+record_critical_branch orphan_list_response_shapes_fail_closed
+
+for response_mode in missing-parameters null-parameters missing-invalid-parameters null-invalid-parameters; do
+  if ORPHAN_TEST_SSM_RESPONSE_MODE="$response_mode" \
+    ORCHESTRATION_TEST_SSM_BATCH_LOG="$tmp_dir/orphans-malformed-ssm-$response_mode-batches.log" \
+    AWS_BIN="$tmp_dir/bin/orphan-aws" \
+    bash "$repo_root/scripts/orphans.sh" "$tmp_dir/manifest.json" \
+    > "$tmp_dir/orphans-malformed-ssm-$response_mode.out" 2>&1; then
+    fail "orphan scan accepted malformed SSM response ($response_mode)"
+  else
+    local_status=$?
+    [[ "$local_status" -eq 1 ]] \
+      || fail "malformed SSM response ($response_mode) returned $local_status instead of a closed failure"
+    grep -Fq 'FAIL: published database SSM parameter metadata query failed' \
+      "$tmp_dir/orphans-malformed-ssm-$response_mode.out" \
+      || fail "orphan scan did not fail closed on malformed SSM response ($response_mode)"
+  fi
+done
+record_critical_branch ssm_parameter_response_shapes_fail_closed
+
+python3 "$repo_root/scripts/test_kubernetes_cleanup_failure.py"
+python3 "$repo_root/scripts/test_destroy_workflow_contract.py"
+record_critical_branch destroy_kubernetes_cleanup_failure_blocks
 
 if ORPHAN_TEST_AUTOMATED_BACKUP_MODE=not-found \
   ORCHESTRATION_TEST_SSM_BATCH_LOG="$tmp_dir/orphans-backup-not-found-batches.log" \

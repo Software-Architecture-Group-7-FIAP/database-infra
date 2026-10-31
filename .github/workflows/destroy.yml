@@ -171,7 +171,9 @@ jobs:
                 serviceaccount/auto-shop-db-bootstrap \
                 --ignore-not-found > "$temp_dir/kubernetes-cleanup.log" 2>&1; then
                 echo "Bootstrap Kubernetes remnants removed." >> "$GITHUB_STEP_SUMMARY"
-              elif ! python3 scripts/classify_kubernetes_cleanup_failure.py "$temp_dir/kubernetes-cleanup.log" >> "$GITHUB_STEP_SUMMARY"; then
+              else
+                python3 scripts/classify_kubernetes_cleanup_failure.py \
+                  "$temp_dir/kubernetes-cleanup.log" >> "$GITHUB_STEP_SUMMARY" || true
                 echo "::error::Bootstrap Kubernetes cleanup failed; Terraform destroy remains blocked."
                 exit 1
               fi

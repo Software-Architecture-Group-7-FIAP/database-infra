@@ -81,9 +81,12 @@ aws_json_automated_backups() {
 
 assert_no_items() {
   local label="$1"
-  local expression="$2"
+  local array_field="$2"
   local filename="$3"
-  if ! "$jq_bin" -e "$expression" "$tmp_dir/$filename.json" >/dev/null 2>&1; then
+  # shellcheck disable=SC2016 # The jq variable must remain literal for jq.
+  if ! "$jq_bin" -e --arg key "$array_field" \
+    '(.[$key] | if type == "array" then length == 0 else false end)' \
+    "$tmp_dir/$filename.json" >/dev/null 2>&1; then
     fail "orphan detected or ownership query incomplete: $label"
   fi
   pass "$label absent"
@@ -139,20 +142,18 @@ assert_secret_absent_or_pending() {
 aws_json tagged_resources resourcegroupstaggingapi get-resources \
   --tag-filters Key=Project,Values=auto-shop Key=Repository,Values=database-infra
 assert_no_items 'all tagged database-infra resources' \
-  '(.ResourceTagMappingList | length == 0)' tagged_resources
+  ResourceTagMappingList tagged_resources
 
 assert_named_resource_absent 'staging RDS instance' rds_instance rds describe-db-instances --db-instance-identifier auto-shop-staging
 
 aws_json manual_snapshots rds describe-db-snapshots --db-instance-identifier auto-shop-staging --snapshot-type manual
-assert_no_items 'manual RDS snapshots' '(.DBSnapshots | length == 0)' manual_snapshots
+assert_no_items 'manual RDS snapshots' DBSnapshots manual_snapshots
 
 aws_json automated_snapshots rds describe-db-snapshots --db-instance-identifier auto-shop-staging --snapshot-type automated
-assert_no_items 'automated RDS snapshots' '(.DBSnapshots | length == 0)' automated_snapshots
+assert_no_items 'automated RDS snapshots' DBSnapshots automated_snapshots
 
 aws_json_automated_backups
-assert_no_items 'automated RDS backups' \
-  '(.DBInstanceAutomatedBackups | if type == "array" then length == 0 else false end)' \
-  automated_backups
+assert_no_items 'automated RDS backups' DBInstanceAutomatedBackups automated_backups
 
 assert_named_resource_absent 'RDS subnet group' subnet_group rds describe-db-subnet-groups --db-subnet-group-name auto-shop-staging-db
 assert_named_resource_absent 'RDS parameter group' parameter_group rds describe-db-parameter-groups --db-parameter-group-name auto-shop-staging-postgres16
@@ -201,7 +202,7 @@ if ! "$aws_bin" --region "$region" eks describe-cluster --name "$cluster_name" -
 fi
 aws_json pod_identity eks list-pod-identity-associations \
   --cluster-name "$cluster_name" --namespace auto-shop-ops --service-account auto-shop-db-bootstrap
-assert_no_items 'bootstrap Pod Identity association' '(.associations | length == 0)' pod_identity
+assert_no_items 'bootstrap Pod Identity association' associations pod_identity
 
 output_parameter_names=(
   /auto-shop/staging/database/host
@@ -227,6 +228,6 @@ if ! capture_ssm_get_parameters_batched \
   "${output_parameter_names[@]}"; then
   fail 'published database SSM parameter metadata query failed'
 fi
-assert_no_items 'published database SSM parameters' '(.Parameters | length == 0)' output_parameters
+assert_no_items 'published database SSM parameters' Parameters output_parameters
 
 pass 'database-infra orphan scan completed without querying secret values or broad SSM paths'

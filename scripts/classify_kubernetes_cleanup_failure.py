@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Allow teardown to continue only when kubectl failed on an unreachable API endpoint."""
+"""Report a sanitized Kubernetes cleanup failure without allowing database teardown."""
 
 from __future__ import annotations
 
@@ -8,11 +8,14 @@ import sys
 from pathlib import Path
 
 
-NETWORK_FAILURE_PATTERNS = (
+NETWORK_CONNECT_PATTERNS = (
     re.compile(r"\bdial tcp\b.*\bi/o timeout\b", re.IGNORECASE),
     re.compile(r"\bconnect: connection timed out\b", re.IGNORECASE),
     re.compile(r"\bconnect: network is unreachable\b", re.IGNORECASE),
     re.compile(r"\bno route to host\b", re.IGNORECASE),
+)
+
+REQUEST_TIMEOUT_PATTERNS = (
     re.compile(r"\bTLS handshake timeout\b", re.IGNORECASE),
     re.compile(r"\bcontext deadline exceeded\b", re.IGNORECASE),
     re.compile(
@@ -28,15 +31,21 @@ SERVER_FAILURE_PATTERNS = (
 )
 
 
-def is_network_unreachable(error_output: str) -> bool:
-    """Return true only for transport timeouts that can be deferred to EKS teardown."""
+def classify_failure(error_output: str) -> str:
+    """Return a fixed diagnostic category; no category permits teardown to continue."""
     if not error_output.strip():
-        return False
+        return "diagnostics_unavailable"
 
     if any(pattern.search(error_output) for pattern in SERVER_FAILURE_PATTERNS):
-        return False
+        return "api_rejected_request"
 
-    return any(pattern.search(error_output) for pattern in NETWORK_FAILURE_PATTERNS)
+    if any(pattern.search(error_output) for pattern in NETWORK_CONNECT_PATTERNS):
+        return "network_connection_failed"
+
+    if any(pattern.search(error_output) for pattern in REQUEST_TIMEOUT_PATTERNS):
+        return "request_timed_out"
+
+    return "unclassified_failure"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -51,16 +60,8 @@ def main(argv: list[str] | None = None) -> int:
         print("Kubernetes cleanup diagnostics could not be read; teardown is blocked.")
         return 1
 
-    if is_network_unreachable(error_output):
-        print(
-            "The Kubernetes API endpoint was unreachable from the runner; "
-            "bootstrap object cleanup is deferred to EKS cluster teardown."
-        )
-        return 0
-
-    print(
-        "Kubernetes cleanup failed for a non-network reason; Terraform destroy remains blocked."
-    )
+    category = classify_failure(error_output)
+    print(f"Kubernetes cleanup failed ({category}); Terraform destroy remains blocked.")
     return 1
 
 
