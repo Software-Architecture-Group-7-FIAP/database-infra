@@ -1,0 +1,29 @@
+name: Ad-hoc database bootstrap (HML)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+    environment: staging
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Verify pinned bootstrap bundle
+        run: ./scripts/bootstrap-db.sh verify
+
+      - name: Run HML database bootstrap
+        run: ./scripts/bootstrap-db.sh bootstrap hml
