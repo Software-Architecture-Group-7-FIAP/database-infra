@@ -12,7 +12,15 @@ The audited staging state at serial 7 currently owns the HML runtime and Lambda 
 
 The PRD root has the analogous runtime/Lambda declarations while PRD apply remains disabled. Resolve its ownership consistently before PRD can be enabled. This note does not authorize state changes or a deployment.
 
-This runbook describes the bindings that must be transferred. It does not authorize an apply, import, destroy, or state migration. Never read or print resource attribute values, secret payloads, credentials, or full state JSON for this procedure.
+This runbook describes the bindings that must be transferred. It does not authorize an apply, import, destroy, or state migration.
+
+## State read boundary
+
+Do not interactively inspect or expose Terraform state. The only routine inventory path is the version-pinned, ephemeral **Read-only database state inventory** workflow in `.github/workflows/database-state-inventory.yml`, manually invoked from **main** by the trusted lifecycle operator after the IAM prerequisite below is satisfied. Its full-object download into a private runner-local temporary directory is the controlled exception to the ban on interactive or exposed state inspection: the workflow may process the complete object only to produce its fixed summary and then remove the temporary files. This does not authorize interactive `terraform state list` or `terraform state show`, other state downloads or decoders, or displaying state contents.
+
+Use the workflow report to reconcile this runbook's known bindings. Require an uncatalogued managed-binding count of `0` for staging, HML, and PRD, and verify the expected presence/absence relationships. A missing or duplicate expected binding, a present unexpected legacy residual, malformed report, or non-zero uncatalogued count means stop and use an approved protected operator procedure before drawing ownership conclusions. The report intentionally contains fixed labels and counts, not raw resource addresses, so it is not the address list for a state transfer. Any exact address-only validation needed for a separately authorized handoff must occur only in that protected procedure.
+
+Never print or place state values, state contents, or raw addresses discovered from the live state in console/job logs, workflow outputs, artifacts, tickets, or model context. Do not retain or upload state files or address-list artifacts. Keep any protected-procedure working material in its approved restricted location and remove temporary files according to that procedure.
 
 ## Bindings to transfer
 
@@ -51,10 +59,10 @@ All shared RDS, network, legacy role, and legacy Pod Identity addresses remain i
 ## Controlled handoff procedure
 
 1. Pause every writer that can change these backend keys, including delivery and lifecycle workflows. Confirm no Terraform run is active and retain the existing S3 state object versions and lock support.
-2. Recheck the live state serial and address inventory immediately before handoff. If the staging serial or the listed address inventory differs from the audit baseline, stop and reconcile the new inventory before proceeding. Do not display `terraform state show`, state JSON, outputs, or secret values.
+2. Recheck the live state serial and fixed-label inventory report immediately before handoff using the state read boundary above. If the staging serial or the known-binding report differs from the audit baseline, stop and reconcile through an approved protected procedure before proceeding. Do not display `terraform state show`, state JSON, outputs, or secret values.
 3. Make restricted, encrypted recovery copies of all three state objects using the approved backend procedure. Keep copies and temporary files private, do not upload them to CI artifacts, and do not print their contents.
 4. Transfer only the exact addresses in the table to their corresponding destination state using a reviewed cross-state migration procedure that preserves resource identity. Do not run `terraform import` or a plan/apply between the source and destination writes. Keep a record of state object versions, serials, and address lists only.
-5. Obtain address-only inventories for the staging, HML, and PRD states. Confirm every table address appears exactly once in its intended state, none remains in the staging state, and no shared address appears in HML or PRD. Run `scripts/validate_database_state_ownership.py` against those inventories in a controlled environment.
+5. Run the pinned ephemeral inventory workflow and reconcile the known-binding rows as described above. Require the uncatalogued managed-binding count to be `0` in every state; if any check fails or an unexpected legacy residual is present, stop and use an approved protected procedure. The fixed-label report is not an address-only inventory. For the exact ownership checks required before transfer, obtain address-only inventories only through the approved protected procedure; confirm every table address appears exactly once in its intended state, none remains in staging, and no shared address appears in HML or PRD. Keep raw addresses out of logs, artifacts, and model context, and run `scripts/validate_database_state_ownership.py` against those inventories only in that protected environment.
 6. If any step fails or ownership is ambiguous, stop before Terraform plan/apply and restore/reconcile only from the protected state copies under operator review. Do not clear state or remove bindings automatically.
 7. After an independent review confirms the inventories and state object versions, an authorized repository administrator may set `DATABASE_INFRA_STATE_HANDOFF_COMPLETE=true`. Keep `DATABASE_INFRA_DEPLOYMENT_READY` false until the separate deployment-role/OIDC readiness review is complete.
 

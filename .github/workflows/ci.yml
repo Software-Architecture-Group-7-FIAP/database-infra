@@ -77,6 +77,14 @@ jobs:
       - name: Test protected database lifecycle validator
         run: python3 -m unittest discover -s scripts -p 'test_*.py'
 
+      - name: Validate rendered bootstrap Job manifest
+        run: |
+          render_dir="$(mktemp -d)"
+          trap 'rm -rf "$render_dir"' EXIT
+          sed 's/{{ENVIRONMENT}}/hml/g' scripts/bootstrap/job.yaml > "$render_dir/job.yaml"
+          printf 'resources:\n  - job.yaml\n' > "$render_dir/kustomization.yaml"
+          kubectl kustomize "$render_dir" > /dev/null
+
       - name: terraform fmt
         run: terraform fmt -check -recursive -diff
 
