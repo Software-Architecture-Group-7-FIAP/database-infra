@@ -202,7 +202,7 @@ def validate_database_action(
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--action", choices=("start", "teardown"), required=True)
-    parser.add_argument("--phase", choices=("bootstrap", "grants"), default="")
+    parser.add_argument("--phase", choices=("provision", "bootstrap", "grants"), default="")
     parser.add_argument("--session-id", required=True)
     parser.add_argument("--started-at", required=True)
     parser.add_argument("--session-mode", choices=("hml", "prd-window"), required=True)
