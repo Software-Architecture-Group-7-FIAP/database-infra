@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import unittest
 from datetime import datetime, timezone
+from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
-from validate_database_lifecycle import LifecycleWindowError, validate_database_action
+from validate_database_lifecycle import LifecycleWindowError, main, validate_database_action
 
 
 BRT = ZoneInfo("America/Sao_Paulo")
@@ -16,6 +17,29 @@ def utc_timestamp(year: int, month: int, day: int, hour: int, minute: int) -> da
 
 
 class DatabaseLifecycleValidationTests(unittest.TestCase):
+    def test_cli_accepts_provision_phase(self) -> None:
+        arguments = [
+            "validate_database_lifecycle.py",
+            "--action",
+            "start",
+            "--phase",
+            "provision",
+            "--session-id",
+            "hml-2026-11-03",
+            "--started-at",
+            "2026-11-03T12:00:00Z",
+            "--session-mode",
+            "hml",
+            "--lifecycle-dispatch-id",
+            DISPATCH_ID,
+        ]
+        with patch("sys.argv", arguments), patch(
+            "validate_database_lifecycle.validate_database_action"
+        ) as validate:
+            self.assertEqual(main(), 0)
+
+        self.assertEqual(validate.call_args.kwargs["phase"], "provision")
+
     def environment(self, session_mode: str = "hml") -> dict[str, str]:
         values = {
             "GITHUB_EVENT_NAME": "workflow_dispatch",
