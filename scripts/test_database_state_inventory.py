@@ -134,12 +134,15 @@ class DatabaseStateInventorySummaryTests(unittest.TestCase):
         prd_residual = (
             'module.ssm_contract.aws_ssm_parameter.string["database/iam/bootstrap-role-arn/prd"]'
         )
+        staging_residual = (
+            'module.ssm_contract.aws_ssm_parameter.string["database/iam/bootstrap-role-arn/staging"]'
+        )
         unknown_address = "aws_iam_user.unexpected_canary"
         states = {
             "staging": {
                 "serial": 7,
-                "addresses": set(SHARED_BINDINGS),
-                "managed_count": len(SHARED_BINDINGS),
+                "addresses": {*SHARED_BINDINGS, staging_residual},
+                "managed_count": len(SHARED_BINDINGS) + 1,
             },
             "hml": {
                 "serial": 2,
@@ -169,6 +172,10 @@ class DatabaseStateInventorySummaryTests(unittest.TestCase):
             report,
         )
         self.assertIn(
+            "| STAGING deprecated bootstrap role ARN parameter (unexpected legacy residual) | present | absent | absent |",
+            report,
+        )
+        self.assertIn(
             "| HML deprecated bootstrap role ARN parameter (unexpected legacy residual) | absent | present | absent |",
             report,
         )
@@ -177,6 +184,10 @@ class DatabaseStateInventorySummaryTests(unittest.TestCase):
             report,
         )
         self.assertIn("| hml | 2 | 4 | 1 |", report)
+        self.assertIn(
+            f"| staging | 7 | {len(SHARED_BINDINGS) + 1} | 0 |",
+            report,
+        )
         self.assertNotIn("TEST_SECRET_VALUE_MUST_NOT_APPEAR", report)
         self.assertNotIn(unknown_address, report)
         self.assertNotIn("aws_iam_role.environment_bootstrap", report)

@@ -65,6 +65,8 @@ for environment_name in ("hml", "prd"):
     transfer_bindings, optional_bindings = environment_bindings(environment_name)
     KNOWN_BINDINGS.update(transfer_bindings)
     KNOWN_BINDINGS.update(optional_bindings)
+
+for environment_name in ("staging", "hml", "prd"):
     LEGACY_RESIDUAL_BINDINGS.update(legacy_residual_bindings(environment_name))
 KNOWN_BINDINGS[ENVIRONMENT_BOOTSTRAP_ROLE] = ENVIRONMENT_BOOTSTRAP_ROLE_LABEL
 KNOWN_BINDINGS.update(LEGACY_RESIDUAL_BINDINGS)
