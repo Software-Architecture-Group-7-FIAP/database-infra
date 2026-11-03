@@ -22,7 +22,18 @@ def _read_addresses(path: Path, label: str) -> set[str]:
         contents = path.read_text(encoding="utf-8")
     except OSError as error:
         raise StateOwnershipError(f"{label} Terraform state inventory is unavailable.") from error
-    return {line.strip() for line in contents.splitlines() if line.strip()}
+
+    addresses = set()
+    for line in contents.splitlines():
+        address = line.strip()
+        if not address:
+            continue
+        if address in addresses:
+            raise StateOwnershipError(
+                f"{label} Terraform state inventory contains duplicate address entries."
+            )
+        addresses.add(address)
+    return addresses
 
 
 def _environment_requirements(environment: str) -> set[str]:
