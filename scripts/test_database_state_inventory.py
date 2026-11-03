@@ -95,6 +95,58 @@ class S3StateMetadataTests(unittest.TestCase):
 
 
 class DatabaseStateInventorySummaryTests(unittest.TestCase):
+    def _read_synthetic_state(self, resources):
+        state_document = {"version": 4, "serial": 1, "resources": resources}
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            state_path = Path(temporary_directory) / "synthetic.tfstate"
+            state_path.write_text(json.dumps(state_document), encoding="utf-8")
+            return read_state(state_path)
+
+    def test_read_state_rejects_malformed_resource_modes(self):
+        malformed_resources = (
+            {"type": "test_resource", "name": "missing_mode", "instances": []},
+            {
+                "mode": "managed-ish",
+                "type": "test_resource",
+                "name": "invalid_mode",
+                "instances": [],
+            },
+            {
+                "mode": None,
+                "type": "test_resource",
+                "name": "null_mode",
+                "instances": [],
+            },
+        )
+
+        for resource in malformed_resources:
+            with self.subTest(resource=resource), self.assertRaisesRegex(
+                InventoryError, "invalid resource metadata"
+            ):
+                self._read_synthetic_state([resource])
+
+    def test_read_state_rejects_duplicate_managed_bindings(self):
+        duplicate_resource = {
+            "mode": "managed",
+            "type": "test_resource",
+            "name": "duplicate",
+            "instances": [{}],
+        }
+
+        with self.assertRaisesRegex(InventoryError, "duplicate managed binding"):
+            self._read_synthetic_state([duplicate_resource, duplicate_resource])
+
+    def test_read_state_rejects_deposed_managed_instances(self):
+        deposed_resource = {
+            "mode": "managed",
+            "type": "test_resource",
+            "name": "deposed",
+            "instances": [{"deposed": "synthetic-key"}],
+        }
+
+        with self.assertRaisesRegex(InventoryError, "deposed managed instance"):
+            self._read_synthetic_state([deposed_resource])
+
     def test_summarizer_uses_fixed_labels_and_hides_values_and_addresses(self):
         state_document = {
             "version": 4,
@@ -269,6 +321,31 @@ class DatabaseStateInventoryWorkflowContractTests(unittest.TestCase):
         ):
             with self.subTest(expected=expected):
                 self.assertIn(expected, runbook)
+
+    def test_handoff_runbook_limits_state_inspection_to_protected_inventory_paths(self):
+        runbook = (ROOT / ".github" / "database-state-handoff.md").read_text(
+            encoding="utf-8"
+        )
+
+        for expected in (
+            "## State read boundary",
+            "only routine inventory path is the version-pinned, ephemeral",
+            "full-object download into a private runner-local temporary directory",
+            "controlled exception to the ban on interactive or exposed state inspection",
+            "interactive `terraform state list` or `terraform state show`",
+            "uncatalogued managed-binding count of `0` for staging, HML, and PRD",
+            "use an approved protected operator procedure",
+            "fixed labels and counts, not raw resource addresses",
+            "console/job logs, workflow outputs, artifacts, tickets, or model context",
+            "only through the approved protected procedure",
+        ):
+            with self.subTest(expected=expected):
+                self.assertIn(expected, runbook)
+
+        self.assertNotIn(
+            "Never read or print resource attribute values, secret payloads, credentials, or full state JSON for this procedure.",
+            runbook,
+        )
 
 
 if __name__ == "__main__":

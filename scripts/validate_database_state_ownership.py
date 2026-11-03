@@ -11,6 +11,12 @@ class StateOwnershipError(ValueError):
     """Raised when a Terraform state crosses its approved ownership boundary."""
 
 
+LEGACY_BOOTSTRAP_ROLE_ARN_PARAMETERS = {
+    f'module.ssm_contract.aws_ssm_parameter.string["database/iam/bootstrap-role-arn/{environment}"]'
+    for environment in ("staging", "hml", "prd")
+}
+
+
 def _read_addresses(path: Path, label: str) -> set[str]:
     try:
         contents = path.read_text(encoding="utf-8")
@@ -32,8 +38,6 @@ def _environment_requirements(environment: str) -> set[str]:
 
 
 def _environment_owned_addresses(environment: str) -> set[str]:
-    # Keep the former bootstrap-role SSM binding allowlisted until a guarded
-    # apply removes it from migrated state; it is no longer part of the contract.
     return _environment_requirements(environment) | {
         f'module.secrets.aws_secretsmanager_secret.migrations["{environment}"]',
         f'aws_iam_policy.migration_{environment}_secret_read',
@@ -42,7 +46,6 @@ def _environment_owned_addresses(environment: str) -> set[str]:
         f'aws_iam_role_policy_attachment.bootstrap_{environment}_secret_access',
         f'module.ssm_contract.aws_ssm_parameter.string["database/secrets/migrations-{environment}-arn"]',
         f'module.ssm_contract.aws_ssm_parameter.string["database/iam/migrations-{environment}-read-policy-arn"]',
-        f'module.ssm_contract.aws_ssm_parameter.string["database/iam/bootstrap-role-arn/{environment}"]',
     }
 
 
@@ -56,6 +59,11 @@ def validate_environment_state(
         if allow_empty:
             return
         raise StateOwnershipError(f"The {environment} state has no transferred live bindings.")
+
+    if addresses & LEGACY_BOOTSTRAP_ROLE_ARN_PARAMETERS:
+        raise StateOwnershipError(
+            "A state contains an unexpected legacy bootstrap role ARN SSM parameter."
+        )
 
     missing = _environment_requirements(environment) - addresses
     if missing:
@@ -94,6 +102,11 @@ def validate_all_states(
     *,
     allow_empty_environments: bool,
 ) -> None:
+    if (staging | hml | prd) & LEGACY_BOOTSTRAP_ROLE_ARN_PARAMETERS:
+        raise StateOwnershipError(
+            "A state contains an unexpected legacy bootstrap role ARN SSM parameter."
+        )
+
     shared_required = {
         "module.network.aws_db_subnet_group.this",
         "module.network.aws_security_group.this",
