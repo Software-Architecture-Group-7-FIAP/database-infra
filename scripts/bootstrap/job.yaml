@@ -29,7 +29,7 @@ spec:
             sizeLimit: 8Mi
         - name: bootstrap-code
           configMap:
-                name: auto-shop-db-bootstrap-sql-{{ENVIRONMENT}}
+            name: auto-shop-db-bootstrap-sql-{{ENVIRONMENT}}
             defaultMode: 0444
       initContainers:
         - name: fetch
