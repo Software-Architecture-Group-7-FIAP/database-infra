@@ -228,3 +228,6 @@ A justificativa compartilhada do banco e seu diagrama ER estão no [auto-shop-sy
 - [RFC-0002: PostgreSQL em Amazon RDS](https://github.com/Software-Architecture-Group-7-FIAP/auto-shop-system/blob/develop/docs/rfc/RFC-0002-banco-postgresql-rds.md)
 - [ADR-0077: HML e PRD por namespace](https://github.com/Software-Architecture-Group-7-FIAP/auto-shop-system/blob/develop/docs/architecture/decisions/ADR-0077-hml-prd-por-namespace.md)
 - [RFC-0001: escolha de AWS](https://github.com/Software-Architecture-Group-7-FIAP/auto-shop-system/blob/develop/docs/rfc/RFC-0001-escolha-cloud-aws.md)
+- [RFC-0005: deploy multi-repositório](https://github.com/Software-Architecture-Group-7-FIAP/auto-shop-system/blob/develop/docs/rfc/RFC-0005-deploy-multi-repositorio-cicd.md)
+- [Diagrama operacional](https://github.com/Software-Architecture-Group-7-FIAP/auto-shop-system/blob/develop/docs/architecture/fase-operacional.mmd) · [README monorepo (#95)](https://github.com/Software-Architecture-Group-7-FIAP/auto-shop-system/blob/develop/README.md) · [runbooks](https://github.com/Software-Architecture-Group-7-FIAP/auto-shop-system/blob/develop/docs/runbooks/README.md)
+- Entrega e state handoff: [`.github/database-delivery.md`](.github/database-delivery.md) · [`.github/database-state-handoff.md`](.github/database-state-handoff.md)
