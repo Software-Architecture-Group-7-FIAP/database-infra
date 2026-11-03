@@ -74,7 +74,7 @@ def _state_address(resource, instance):
             address += f"[{index_key}]"
         else:
             raise InventoryError("Terraform state contains unsupported managed instance metadata.")
-    if instance.get("deposed"):
+    if "deposed" in instance:
         raise InventoryError("Terraform state contains a deposed managed instance requiring operator review.")
     return address
 
@@ -98,7 +98,7 @@ def read_state(path):
     addresses = set()
     managed_count = 0
     for resource in state["resources"]:
-        if not isinstance(resource, dict):
+        if not isinstance(resource, dict) or resource.get("mode") not in ("managed", "data"):
             raise InventoryError("Terraform state contains invalid resource metadata.")
         if resource.get("mode") != "managed":
             continue
