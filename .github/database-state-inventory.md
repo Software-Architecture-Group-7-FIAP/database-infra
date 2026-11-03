@@ -12,7 +12,7 @@ Run **Database state inventory** manually from the **main** branch using the tru
 - **database-infra/hml/terraform.tfstate**
 - **database-infra/prd/terraform.tfstate**
 
-The job pins each read to the VersionId returned by HeadObject, enforces a 10 MiB limit, stores temporary files with owner-only permissions, and removes them at job exit. It does not upload artifacts. The summary contains only the fixed catalog labels, state serials, and managed-binding counts. Raw addresses, state values, outputs, secrets, ARNs, and object version IDs must not be copied into logs, artifacts, or reports.
+The job pins each read to the VersionId returned by HeadObject, enforces a 10 MiB limit, stores temporary files with owner-only permissions, and removes them at job exit. It does not upload artifacts. The summary contains only fixed catalog labels, state serials, managed-binding counts, and presence statuses for those labels. Raw addresses, state values, outputs, secrets, ARNs, and object version IDs must not be copied into logs, artifacts, or reports.
 
 The inventory script is deliberately limited to a fixed catalog derived from the repository Terraform configuration and ownership validator. It reports uncatalogued managed-binding counts without exposing their addresses. Any malformed state or uncatalogued bindings require investigation in a protected operator-controlled environment before ownership is concluded.
 
