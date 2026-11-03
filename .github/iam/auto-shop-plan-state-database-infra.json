@@ -1,0 +1,81 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ListOnlyExactStateKeys",
+      "Effect": "Allow",
+      "Action": ["s3:ListBucket", "s3:ListBucketVersions"],
+      "Resource": "arn:aws:s3:::auto-shop-tfstate-035611741563-use1",
+      "Condition": {
+        "StringEquals": {
+          "s3:prefix": "database-infra/staging/terraform.tfstate"
+        }
+      }
+    },
+    {
+      "Sid": "DenyListingOutsideExactStateKeys",
+      "Effect": "Deny",
+      "Action": ["s3:ListBucket", "s3:ListBucketVersions"],
+      "Resource": "arn:aws:s3:::auto-shop-tfstate-035611741563-use1",
+      "Condition": {
+        "StringNotEquals": {
+          "s3:prefix": "database-infra/staging/terraform.tfstate"
+        }
+      }
+    },
+    {
+      "Sid": "DenyListingOtherBuckets",
+      "Effect": "Deny",
+      "Action": ["s3:ListBucket", "s3:ListBucketVersions"],
+      "NotResource": "arn:aws:s3:::auto-shop-tfstate-035611741563-use1"
+    },
+    {
+      "Sid": "DenyObjectReadsOutsideExactStateKeys",
+      "Effect": "Deny",
+      "Action": "s3:GetObject*",
+      "NotResource": [
+        "arn:aws:s3:::auto-shop-tfstate-035611741563-use1/database-infra/staging/terraform.tfstate",
+        "arn:aws:s3:::auto-shop-tfstate-035611741563-use1/database-infra/hml/terraform.tfstate",
+        "arn:aws:s3:::auto-shop-tfstate-035611741563-use1/database-infra/prd/terraform.tfstate"
+      ]
+    },
+    {
+      "Sid": "DenyBucketEnumeration",
+      "Effect": "Deny",
+      "Action": "s3:ListAllMyBuckets",
+      "Resource": "*"
+    },
+    {
+      "Sid": "DenyS3WritesOutsidePlanArtifacts",
+      "Effect": "Deny",
+      "Action": [
+        "s3:UploadPart",
+        "s3:PutObject*",
+        "s3:DeleteObject*",
+        "s3:CreateMultipartUpload",
+        "s3:CompleteMultipartUpload",
+        "s3:AbortMultipartUpload"
+      ],
+      "NotResource": "arn:aws:s3:::auto-shop-tfstate-035611741563-use1/_no_plan_uploads_configured/*"
+    },
+    {
+      "Sid": "DenyPlanArtifactDeletion",
+      "Effect": "Deny",
+      "Action": "s3:DeleteObject*",
+      "Resource": "arn:aws:s3:::auto-shop-tfstate-035611741563-use1/*"
+    },
+    {
+      "Sid": "DenyStateBucketAdministration",
+      "Effect": "Deny",
+      "NotAction": [
+        "s3:ListBucket",
+        "s3:GetEncryptionConfiguration",
+        "s3:GetBucketVersioning",
+        "s3:GetBucketPublicAccessBlock",
+        "s3:GetBucketOwnershipControls",
+        "s3:GetBucketLocation"
+      ],
+      "Resource": "arn:aws:s3:::auto-shop-tfstate-035611741563-use1"
+    }
+  ]
+}
