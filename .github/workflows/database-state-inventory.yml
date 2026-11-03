@@ -92,21 +92,22 @@ jobs:
           for environment in staging hml prd; do
             key="database-infra/$environment/terraform.tfstate"
             state_file="$temp_dir/$environment.tfstate"
+            metadata_file="$temp_dir/$environment.metadata.json"
             diagnostic_file="$temp_dir/$environment.aws.stderr"
 
-            if ! metadata="$(aws s3api head-object \
+            if ! aws s3api head-object \
               --bucket "$bucket" \
               --key "$key" \
-              --query '[VersionId,ContentLength]' \
-              --output text 2>"$diagnostic_file")"; then
+              --query '{VersionId: VersionId, ContentLength: ContentLength}' \
+              --output json >"$metadata_file" 2>"$diagnostic_file"; then
               echo "::error::Could not read metadata for the $environment state; private diagnostics were discarded."
               exit 1
             fi
-            read -r version_id content_length <<< "$metadata"
-            if [[ -z "$version_id" || "$version_id" == 'None' || ! "$content_length" =~ ^[0-9]+$ ]]; then
+            if ! metadata="$(python3 scripts/validate_s3_state_metadata.py "$metadata_file" 2>"$diagnostic_file")"; then
               echo "::error::The $environment state is not a versioned object with valid metadata."
               exit 1
             fi
+            read -r version_id content_length <<< "$metadata"
             if (( content_length > 10485760 )); then
               echo "::error::The $environment state exceeds the inventory size limit."
               exit 1

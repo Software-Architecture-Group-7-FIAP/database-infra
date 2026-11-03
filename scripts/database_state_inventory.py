@@ -18,9 +18,9 @@ SHARED_BINDINGS = {
     'module.network.aws_vpc_security_group_ingress_rule.this["lambda"]': "Shared ingress from Lambda",
     "module.instance.aws_db_parameter_group.this": "Shared database parameter group",
     "module.instance.aws_db_instance.this": "Shared RDS instance",
-    "aws_iam_role.db_bootstrap": "Shared legacy bootstrap role",
-    "aws_iam_role_policy.db_bootstrap": "Shared legacy bootstrap inline policy",
-    "aws_eks_pod_identity_association.db_bootstrap": "Shared legacy bootstrap Pod Identity association",
+    "aws_iam_role.db_bootstrap": "Staging shared legacy bootstrap role",
+    "aws_iam_role_policy.db_bootstrap": "Staging shared legacy bootstrap inline policy",
+    "aws_eks_pod_identity_association.db_bootstrap": "Staging shared legacy bootstrap Pod Identity association",
     'module.ssm_contract.aws_ssm_parameter.string["database/host"]': "Shared SSM database host binding",
     'module.ssm_contract.aws_ssm_parameter.string["database/port"]': "Shared SSM database port binding",
     'module.ssm_contract.aws_ssm_parameter.string["database/security-group-id"]': "Shared SSM database security group binding",
@@ -45,18 +45,29 @@ def environment_bindings(environment):
         f"aws_iam_role_policy_attachment.bootstrap_{environment}_secret_access": f"{environment.upper()} bootstrap policy attachment",
         f'module.ssm_contract.aws_ssm_parameter.string["database/secrets/migrations-{environment}-arn"]': f"{environment.upper()} migration secret ARN parameter",
         f'module.ssm_contract.aws_ssm_parameter.string["database/iam/migrations-{environment}-read-policy-arn"]': f"{environment.upper()} migration policy ARN parameter",
-        f'module.ssm_contract.aws_ssm_parameter.string["database/iam/bootstrap-role-arn/{environment}"]': f"{environment.upper()} legacy bootstrap role ARN parameter",
     }
     return transfers, optional
 
 
-LEGACY_ENVIRONMENT_ROLE = "aws_iam_role.environment_bootstrap"
-ALL_BINDINGS = dict(SHARED_BINDINGS)
+def legacy_residual_bindings(environment):
+    return {
+        f'module.ssm_contract.aws_ssm_parameter.string["database/iam/bootstrap-role-arn/{environment}"]': (
+            f"{environment.upper()} deprecated bootstrap role ARN parameter (unexpected legacy residual)"
+        ),
+    }
+
+
+ENVIRONMENT_BOOTSTRAP_ROLE = "aws_iam_role.environment_bootstrap"
+ENVIRONMENT_BOOTSTRAP_ROLE_LABEL = "Environment-specific bootstrap role (HML/PRD only)"
+KNOWN_BINDINGS = dict(SHARED_BINDINGS)
+LEGACY_RESIDUAL_BINDINGS = {}
 for environment_name in ("hml", "prd"):
     transfer_bindings, optional_bindings = environment_bindings(environment_name)
-    ALL_BINDINGS.update(transfer_bindings)
-    ALL_BINDINGS.update(optional_bindings)
-ALL_BINDINGS[LEGACY_ENVIRONMENT_ROLE] = "Legacy environment bootstrap role"
+    KNOWN_BINDINGS.update(transfer_bindings)
+    KNOWN_BINDINGS.update(optional_bindings)
+    LEGACY_RESIDUAL_BINDINGS.update(legacy_residual_bindings(environment_name))
+KNOWN_BINDINGS[ENVIRONMENT_BOOTSTRAP_ROLE] = ENVIRONMENT_BOOTSTRAP_ROLE_LABEL
+KNOWN_BINDINGS.update(LEGACY_RESIDUAL_BINDINGS)
 
 
 def _state_address(resource, instance):
@@ -123,6 +134,11 @@ def _presence_row(label, address, states):
 
 
 def build_report(states):
+    if ENVIRONMENT_BOOTSTRAP_ROLE in states["staging"]["addresses"]:
+        raise InventoryError(
+            "The staging state contains an environment-specific bootstrap role that is expected only in HML and PRD."
+        )
+
     lines = [
         "# Redacted database Terraform state inventory",
         "",
@@ -133,7 +149,7 @@ def build_report(states):
     ]
     for name in ("staging", "hml", "prd"):
         state = states[name]
-        unknown_count = len(state["addresses"] - ALL_BINDINGS.keys())
+        unknown_count = len(state["addresses"] - KNOWN_BINDINGS.keys())
         lines.append(f"| {name} | {state['serial']} | {state['managed_count']} | {unknown_count} |")
 
     lines.extend(["", "## Shared bindings", "", "| Documented binding | staging | hml | prd |", "|---|---|---|---|"])
@@ -153,7 +169,7 @@ def build_report(states):
             lines.append(_presence_row(label, address, states))
         lines.extend([
             "",
-            f"## {environment_name.upper()} optional or legacy bindings",
+            f"## {environment_name.upper()} optional bindings",
             "",
             "| Documented binding | staging | hml | prd |",
             "|---|---|---|---|",
@@ -163,11 +179,20 @@ def build_report(states):
 
     lines.extend([
         "",
-        "## Shared legacy environment role",
+        "## Environment-specific bootstrap role",
         "",
         "| Documented binding | staging | hml | prd |",
         "|---|---|---|---|",
-        _presence_row(ALL_BINDINGS[LEGACY_ENVIRONMENT_ROLE], LEGACY_ENVIRONMENT_ROLE, states),
+        _presence_row(ENVIRONMENT_BOOTSTRAP_ROLE_LABEL, ENVIRONMENT_BOOTSTRAP_ROLE, states),
+        "",
+        "## Unexpected legacy residual bindings",
+        "",
+        "| Documented binding | staging | hml | prd |",
+        "|---|---|---|---|",
+    ])
+    for address, label in LEGACY_RESIDUAL_BINDINGS.items():
+        lines.append(_presence_row(label, address, states))
+    lines.extend([
         "",
         "Uncatalogued bindings are reported only as counts; inspect them through the protected operator procedure before making an ownership decision. This report does not validate ownership or authorize Terraform plans, applies, imports, or state moves.",
         "",
