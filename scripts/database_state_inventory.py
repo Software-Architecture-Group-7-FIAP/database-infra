@@ -126,7 +126,7 @@ def build_report(states):
     lines = [
         "# Redacted database Terraform state inventory",
         "",
-        "This report contains state serials, counts, and fixed labels only. It omits resource addresses, values, outputs, secret metadata, object version IDs, and state contents.",
+        "This report contains state serials, counts, fixed labels, and presence statuses for those labels only. It omits raw resource addresses, values, outputs, secret metadata, object version IDs, and state contents.",
         "",
         "| State | Serial | Managed bindings | Uncatalogued bindings |",
         "|---|---:|---:|---:|",
